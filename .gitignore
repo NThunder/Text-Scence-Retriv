@@ -1,0 +1,32 @@
+# Данные
+/data/
+*.pth
+*.pt
+*.bin
+*.npy
+*.npz
+
+# Логи и чекпоинты
+/logs/
+/checkpoints/
+/embeddings/
+/plots/
+*.log
+*.json
+
+# Виртуальные окружения
+/env/
+/venv/
+.conda/
+.mlspace/
+
+# Результаты обучения
+best_model/
+point_encoder_*
+lora_*_encoder_*
+
+# Временные файлы
+*.pyc
+__pycache__/
+*.tmp
+.DS_Store
