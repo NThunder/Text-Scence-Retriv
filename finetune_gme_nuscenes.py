@@ -38,6 +38,12 @@ def parse_args():
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--save_embeddings_every", type=int, default=1, help="Save embeddings every N epochs")
+    parser.add_argument("--max_train_pairs", type=int, default=-1,
+        help="Max training pairs (-1 = all)")
+    parser.add_argument("--max_val_pairs", type=int, default=-1,
+        help="Max validation pairs (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1,
+        help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
@@ -84,10 +90,9 @@ for scene in nusc.scene:
                     text = "The camera view contains: " + "; ".join(camera_captions[current][cam])
                     train_pairs.append((current, cam, text))
         current = nusc.get("sample", current)["next"] if current else None
-        if len(train_pairs) >= 10000:
-            break
-    if len(train_pairs) >= 10000:
-        break
+
+if args.max_train_pairs > 0:
+    train_pairs = train_pairs[:args.max_train_pairs]
 
 print(f"Selected {len(train_pairs)} training pairs")
 
@@ -96,18 +101,28 @@ val_pairs = []
 for scene in nusc.scene:
     if scene["name"] not in val_scenes:
         continue
+
+    # Собираем все sample_tokens сцены
+    scene_tokens = []
     current = scene["first_sample_token"]
-    while current and len(val_pairs) < 500:
-        if current in camera_captions:
-            for cam in CAMERAS:
-                if cam in camera_captions[current] and camera_captions[current][cam]:
-                    text = "The camera view contains: " + "; ".join(camera_captions[current][cam])
-                    val_pairs.append((current, cam, text))
+    while current:
+        scene_tokens.append(current)
         current = nusc.get("sample", current)["next"] if current else None
-        if len(val_pairs) >= 500:
-            break
-    if len(val_pairs) >= 500:
-        break
+
+    # Равномерная выборка по сцене
+    if args.val_samples_per_scene > 0:
+        step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+        scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+
+    for sample_token in scene_tokens:
+        if sample_token in camera_captions:
+            for cam in CAMERAS:
+                if cam in camera_captions[sample_token] and camera_captions[sample_token][cam]:
+                    text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
+                    val_pairs.append((sample_token, cam, text))
+
+if args.max_val_pairs > 0:
+    val_pairs = val_pairs[:args.max_val_pairs]
 
 print(f"Selected {len(val_pairs)} validation pairs")
 
@@ -243,15 +258,20 @@ class TrainingHistory:
     def __init__(self):
         self.train_losses = []
         self.val_losses = []
-        self.val_r1 = []
-        self.val_r5 = []
-        self.val_r10 = []
-        self.val_mrr = []
+        self.metrics = {}  # {mode_temporal: {r1: [], r5: [], r10: [], mrr: []}}
+        for mode in ["any", "all"]:
+            for temporal in [True, False]:
+                key = f"{mode}_{'temporal' if temporal else 'notemporal'}"
+                self.metrics[key] = {'r1': [], 'r5': [], 'r10': [], 'mrr': []}
         self.best_r1 = 0.0
         self.best_epoch = 0
+        self.best_metric_key = "any_temporal"
     
     def save_plots(self, output_dir):
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        n_variants = len(self.metrics)
+        fig, axes = plt.subplots(2, n_variants, figsize=(6 * n_variants, 10))
+        if n_variants == 1:
+            axes = axes.reshape(2, 1)
         
         # Training and Validation Loss
         axes[0, 0].plot(self.train_losses, label='Train Loss', color='blue', linewidth=2)
@@ -269,24 +289,15 @@ class TrainingHistory:
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3)
         
-        # R@1 Metric
-        axes[1, 0].plot(self.val_r1, label='R@1', marker='o', linewidth=2)
-        axes[1, 0].set_title('R@1 Metric')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('R@1')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True, alpha=0.3)
-        axes[1, 0].set_ylim([0, 1])
-        
-        # R@5 and MRR
-        axes[1, 1].plot(self.val_r5, label='R@5', marker='s', linewidth=2)
-        axes[1, 1].plot(self.val_mrr, label='MRR', marker='^', linewidth=2)
-        axes[1, 1].set_title('R@5 and MRR Metrics')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Score')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-        axes[1, 1].set_ylim([0, 1])
+        for col, (key, metric_dict) in enumerate(self.metrics.items()):
+            # R@1
+            axes[1, col].plot(metric_dict['r1'], label='R@1', marker='o', linewidth=2)
+            axes[1, col].set_title(f'R@1 ({key})')
+            axes[1, col].set_xlabel('Epoch')
+            axes[1, col].set_ylabel('R@1')
+            axes[1, col].legend()
+            axes[1, col].grid(True, alpha=0.3)
+            axes[1, col].set_ylim([0, 1])
         
         plt.tight_layout()
         plt.savefig(f"{output_dir}/plots/training_history.png", dpi=150)
@@ -296,13 +307,16 @@ class TrainingHistory:
         history_dict = {
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'val_r1': self.val_r1,
-            'val_r5': self.val_r5,
-            'val_r10': self.val_r10,
-            'val_mrr': self.val_mrr,
             'best_r1': self.best_r1,
-            'best_epoch': self.best_epoch
+            'best_epoch': self.best_epoch,
+            'best_metric_key': self.best_metric_key,
         }
+        for key, metric_dict in self.metrics.items():
+            history_dict[f'val_{key}_r1'] = metric_dict['r1']
+            history_dict[f'val_{key}_r5'] = metric_dict['r5']
+            history_dict[f'val_{key}_r10'] = metric_dict['r10']
+            history_dict[f'val_{key}_mrr'] = metric_dict['mrr']
+        
         with open(f"{output_dir}/plots/history.json", 'w') as f:
             json.dump(history_dict, f, indent=2)
         
@@ -350,41 +364,55 @@ def get_embeddings(model, images, texts):
     
     return F.normalize(img_embs, dim=-1), F.normalize(txt_embs, dim=-1)
 
-def compute_metrics_with_relevance(similarity, sample_tokens, cameras, camera_captions, 
-                                    sample_to_next, temporal_window=10):
-    """Вычисляет метрики с учётом атрибутов и временной близости"""
-    # Создаём индекс для быстрого поиска
+def compute_metrics_with_relevance(similarity, sample_tokens, cameras, camera_captions,
+                                    sample_to_next, temporal_window=10,
+                                    relevance_mode="any", temporal_enabled=True):
+    """Вычисляет метрики с учётом атрибутов и временной близости.
+    
+    relevance_mode: "any" — хотя бы один общий атрибут, "all" — все атрибуты запроса должны быть в кандидате.
+    temporal_enabled: учитывать ли временных соседей.
+    """
     local_index = {}
     for idx, (token, cam) in enumerate(zip(sample_tokens, cameras)):
         local_index[(token, cam)] = idx
-    
-    # Создаём словарь атрибутов
+
     attr_to_indices = defaultdict(set)
+    attrs_by_idx = []
     for idx, (token, cam) in enumerate(zip(sample_tokens, cameras)):
+        sample_cam_attrs = set()
         if token in camera_captions and cam in camera_captions[token]:
             for attr in camera_captions[token][cam]:
                 attr_to_indices[attr].add(idx)
-    
+                sample_cam_attrs.add(attr)
+        attrs_by_idx.append(sample_cam_attrs)
+
     ranks = []
     for i in range(len(sample_tokens)):
-        sample_token, cam = sample_tokens[i], cameras[i]
-        
-        # Релевантные индексы по атрибутам
+        query_token, query_cam = sample_tokens[i], cameras[i]
+
+        query_attrs = set()
+        if query_token in camera_captions and query_cam in camera_captions[query_token]:
+            query_attrs = set(camera_captions[query_token][query_cam])
+
         relevant = set()
-        if sample_token in camera_captions and cam in camera_captions[sample_token]:
-            for attr in camera_captions[sample_token][cam]:
+        if relevance_mode == "any":
+            for attr in query_attrs:
                 relevant.update(attr_to_indices[attr])
-        
-        # Добавляем временные соседи
-        current = sample_token
-        for _ in range(temporal_window):
-            current = sample_to_next.get(current, "")
-            if not current:
-                break
-            if (current, cam) in local_index:
-                relevant.add(local_index[(current, cam)])
-        
-        # Находим ранг первого релевантного
+        else:
+            if query_attrs:
+                for idx, candidate_attrs in enumerate(attrs_by_idx):
+                    if query_attrs.issubset(candidate_attrs):
+                        relevant.add(idx)
+
+        if temporal_enabled:
+            current = query_token
+            for _ in range(temporal_window):
+                current = sample_to_next.get(current, "")
+                if not current:
+                    break
+                if (current, query_cam) in local_index:
+                    relevant.add(local_index[(current, query_cam)])
+
         sorted_indices = torch.argsort(similarity[i], descending=True)
         found = False
         for rank_pos, idx in enumerate(sorted_indices.tolist()):
@@ -394,7 +422,7 @@ def compute_metrics_with_relevance(similarity, sample_tokens, cameras, camera_ca
                 break
         if not found:
             ranks.append(len(sample_tokens))
-    
+
     ranks = np.array(ranks)
     return {
         'R@1': np.mean(ranks <= 1),
@@ -457,22 +485,28 @@ def validate(model, val_loader, epoch, save_embeddings=False):
     
     # Вычисляем матрицу сходства
     similarity = all_img_embs @ all_txt_embs.T
-    
-    # Вычисляем метрики с учётом релевантности
-    metrics = compute_metrics_with_relevance(
-        similarity, all_sample_tokens, all_cameras, camera_captions,
-        sample_to_next, args.temporal_window
-    )
-    
+
+    # Метрики для всех комбинаций
+    metrics = {}
+    for mode in ["any", "all"]:
+        for temporal in [True, False]:
+            key = f"{mode}_{'temporal' if temporal else 'notemporal'}"
+            metrics[key] = compute_metrics_with_relevance(
+                similarity, all_sample_tokens, all_cameras, camera_captions,
+                sample_to_next, args.temporal_window,
+                relevance_mode=mode, temporal_enabled=temporal
+            )
+
     print(f"\n{'='*70}")
     print(f"Validation Results (Epoch {epoch+1})")
     print(f"{'='*70}")
-    print(f"Text → Image Retrieval (with attribute + temporal relevance):")
-    print(f"  R@1:   {metrics['R@1']:.4f}")
-    print(f"  R@5:   {metrics['R@5']:.4f}")
-    print(f"  R@10:  {metrics['R@10']:.4f}")
-    print(f"  MRR:   {metrics['MRR']:.4f}")
-    print(f"  Median Rank: {metrics['Median']:.1f}")
+    for mode in ["any", "all"]:
+        for temporal in [True, False]:
+            key = f"{mode}_{'temporal' if temporal else 'notemporal'}"
+            m = metrics[key]
+            label = f"Text → Image Retrieval (mode={mode}, temporal={'on' if temporal else 'off'}):"
+            print(f"  [{label}]")
+            print(f"    R@1: {m['R@1']:.4f}  R@5: {m['R@5']:.4f}  R@10: {m['R@10']:.4f}  MRR: {m['MRR']:.4f}  Median: {m['Median']:.1f}")
     print(f"  Loss:  {val_loss:.4f}")
     print(f"{'='*70}\n")
     
@@ -485,10 +519,15 @@ def validate(model, val_loader, epoch, save_embeddings=False):
         print(f"✓ Saved embeddings to {embeddings_dir}")
     
     # Логирование в TensorBoard
-    writer.add_scalar('Val/R@1', metrics['R@1'], epoch)
-    writer.add_scalar('Val/R@5', metrics['R@5'], epoch)
-    writer.add_scalar('Val/R@10', metrics['R@10'], epoch)
-    writer.add_scalar('Val/MRR', metrics['MRR'], epoch)
+    for mode in ["any", "all"]:
+        for temporal in [True, False]:
+            key = f"{mode}_{'temporal' if temporal else 'notemporal'}"
+            m = metrics[key]
+            prefix = f"Val/{mode}_{'temporal' if temporal else 'no_temporal'}"
+            writer.add_scalar(f'{prefix}/R@1', m['R@1'], epoch)
+            writer.add_scalar(f'{prefix}/R@5', m['R@5'], epoch)
+            writer.add_scalar(f'{prefix}/R@10', m['R@10'], epoch)
+            writer.add_scalar(f'{prefix}/MRR', m['MRR'], epoch)
     writer.add_scalar('Val/Loss', val_loss, epoch)
     
     model.train()
@@ -579,10 +618,11 @@ for epoch in range(start_epoch, args.epochs):
     # Сохраняем историю
     history.train_losses.append(train_loss)
     history.val_losses.append(val_loss)
-    history.val_r1.append(metrics['R@1'])
-    history.val_r5.append(metrics['R@5'])
-    history.val_r10.append(metrics['R@10'])
-    history.val_mrr.append(metrics['MRR'])
+    for key, m in metrics.items():
+        history.metrics[key]['r1'].append(m['R@1'])
+        history.metrics[key]['r5'].append(m['R@5'])
+        history.metrics[key]['r10'].append(m['R@10'])
+        history.metrics[key]['mrr'].append(m['MRR'])
     
     # Сохраняем чекпоинт
     checkpoint = {
@@ -593,18 +633,18 @@ for epoch in range(start_epoch, args.epochs):
         'history': {
             'train_losses': history.train_losses,
             'val_losses': history.val_losses,
-            'val_r1': history.val_r1,
-            'val_r5': history.val_r5,
-            'val_r10': history.val_r10,
-            'val_mrr': history.val_mrr,
+            'metrics': {k: {mk: mv[:] for mk, mv in mm.items()} for k, mm in history.metrics.items()},
         }
     }
     torch.save(checkpoint, f"{args.output_dir}/checkpoints/checkpoint_epoch_{epoch}.pth")
     
-    # Сохраняем лучшую модель
-    if metrics['R@1'] > history.best_r1:
-        history.best_r1 = metrics['R@1']
+    # Сохраняем лучшую модель (по any_temporal R@1)
+    best_key = "any_temporal"
+    current_r1 = metrics[best_key]['R@1']
+    if current_r1 > history.best_r1:
+        history.best_r1 = current_r1
         history.best_epoch = epoch + 1
+        history.best_metric_key = best_key
         
         save_dir = f"{args.output_dir}/best_model"
         os.makedirs(save_dir, exist_ok=True)
@@ -635,11 +675,14 @@ history.save_plots(args.output_dir)
 final_results = {
     'best_r1': history.best_r1,
     'best_epoch': history.best_epoch,
-    'final_r1': history.val_r1[-1] if history.val_r1 else 0,
-    'final_r5': history.val_r5[-1] if history.val_r5 else 0,
-    'final_r10': history.val_r10[-1] if history.val_r10 else 0,
-    'final_mrr': history.val_mrr[-1] if history.val_mrr else 0,
+    'best_metric_key': history.best_metric_key,
 }
+for key in history.metrics:
+    m = history.metrics[key]
+    final_results[f'final_{key}_r1'] = m['r1'][-1] if m['r1'] else 0
+    final_results[f'final_{key}_r5'] = m['r5'][-1] if m['r5'] else 0
+    final_results[f'final_{key}_r10'] = m['r10'][-1] if m['r10'] else 0
+    final_results[f'final_{key}_mrr'] = m['mrr'][-1] if m['mrr'] else 0
 
 with open(f"{args.output_dir}/final_results.json", 'w') as f:
     json.dump(final_results, f, indent=2)
@@ -647,11 +690,11 @@ with open(f"{args.output_dir}/final_results.json", 'w') as f:
 print(f"\n{'='*60}")
 print(f"✅ Fine-tuning completed!")
 print(f"{'='*60}")
-print(f"Best R@1: {history.best_r1:.4f} (epoch {history.best_epoch})")
-print(f"Final R@1: {final_results['final_r1']:.4f}")
-print(f"Final R@5: {final_results['final_r5']:.4f}")
-print(f"Final R@10: {final_results['final_r10']:.4f}")
-print(f"Final MRR: {final_results['final_mrr']:.4f}")
+print(f"Best R@1 ({history.best_metric_key}): {history.best_r1:.4f} (epoch {history.best_epoch})")
+for key in history.metrics:
+    m = history.metrics[key]
+    if m['r1']:
+        print(f"Final [{key}] R@1: {m['r1'][-1]:.4f}  R@5: {m['r5'][-1]:.4f}  R@10: {m['r10'][-1]:.4f}  MRR: {m['mrr'][-1]:.4f}")
 print(f"{'='*60}")
 print(f"Results saved to: {args.output_dir}")
 print(f"  - Plots: {args.output_dir}/plots/")

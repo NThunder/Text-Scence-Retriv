@@ -17,6 +17,8 @@ def parse_args():
     parser.add_argument("--dataroot", type=str, default="/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/data/sets/nuScenes/trainval", help="Path to nuScenes dataset")
     parser.add_argument("--output_path", type=str, default="./camera_image_embeddings_llm2clip_openai_l14_336_val150_motion_map_lora4.pth", help="Path to output embeddings")
     parser.add_argument("--lora_path", type=str, default=None, help="Path to LoRA adapter")
+    parser.add_argument("--max_val_samples", type=int, default=-1, help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1, help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
@@ -45,13 +47,18 @@ val_scenes = set(create_splits_scenes()["val"])
 val_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in val_scenes:
+        scene_tokens = []
         current_sample_token = scene["first_sample_token"]
-        while current_sample_token != "" and len(val_sample_tokens) < 150:
-            val_sample_tokens.append(current_sample_token)
+        while current_sample_token != "":
+            scene_tokens.append(current_sample_token)
             current_sample_token = nusc.get("sample", current_sample_token)["next"]
-        if len(val_sample_tokens) >= 150:
-            break
-val_sample_tokens = val_sample_tokens[:150]
+        if args.val_samples_per_scene > 0:
+            step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+            scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+        val_sample_tokens.extend(scene_tokens)
+
+if args.max_val_samples > 0:
+    val_sample_tokens = val_sample_tokens[:args.max_val_samples]
 print(f"Selected {len(val_sample_tokens)} validation samples.")
 
 # === Имена камер ===

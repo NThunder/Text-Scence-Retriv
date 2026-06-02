@@ -44,6 +44,11 @@ def parse_args():
     parser.add_argument("--max_points", type=int, default=20000)
     parser.add_argument("--fusion_dim", type=int, default=768, help="Dimension for fused embedding")
     parser.add_argument("--num_queries", type=int, default=4, help="Number of learnable queries in fusion")
+    parser.add_argument("--max_train_samples", type=int, default=-1,
+        help="Max training samples (-1 = all)")
+    parser.add_argument("--max_val_samples", type=int, default=-1,
+        help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1, help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
@@ -75,12 +80,12 @@ train_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in train_scenes:
         current = scene["first_sample_token"]
-        while current != "" and len(train_sample_tokens) < 750:
+        while current != "":
             train_sample_tokens.append(current)
             current = nusc.get("sample", current)["next"]
-        if len(train_sample_tokens) >= 750:
-            break
-train_sample_tokens = train_sample_tokens[:750]
+
+if args.max_train_samples > 0:
+    train_sample_tokens = train_sample_tokens[:args.max_train_samples]
 print(f"Selected {len(train_sample_tokens)} train samples.")
 
 # ========== 3. Сбор пар ==========
@@ -304,18 +309,23 @@ train_dataset = JointNuScenesDataset(nusc, train_pairs, processor)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
                           num_workers=4, pin_memory=True, collate_fn=collate_fn)
 
-def prepare_val_dataset(nusc, camera_captions, processor, num_samples=150):
+def prepare_val_dataset(nusc, camera_captions, processor, num_samples=150, val_samples_per_scene=-1):
     val_scenes = set(create_splits_scenes()["val"])
     val_sample_tokens = []
     for scene in nusc.scene:
         if scene["name"] in val_scenes:
+            scene_tokens = []
             current = scene["first_sample_token"]
-            while current != "" and len(val_sample_tokens) < num_samples:
-                val_sample_tokens.append(current)
+            while current != "":
+                scene_tokens.append(current)
                 current = nusc.get("sample", current)["next"]
-            if len(val_sample_tokens) >= num_samples:
-                break
-    val_sample_tokens = val_sample_tokens[:num_samples]
+            if val_samples_per_scene > 0:
+                step = max(1, len(scene_tokens) // val_samples_per_scene)
+                scene_tokens = scene_tokens[::step][:val_samples_per_scene]
+            val_sample_tokens.extend(scene_tokens)
+
+    if num_samples > 0:
+        val_sample_tokens = val_sample_tokens[:num_samples]
 
     val_pairs = []
     for sample_token in val_sample_tokens:
@@ -327,7 +337,7 @@ def prepare_val_dataset(nusc, camera_captions, processor, num_samples=150):
                 val_pairs.append((sample_token, cam, scene_text))
     return JointNuScenesDataset(nusc, val_pairs, processor), len(val_pairs)
 
-val_dataset, num_val_pairs = prepare_val_dataset(nusc, camera_captions, processor, num_samples=150)
+val_dataset, num_val_pairs = prepare_val_dataset(nusc, camera_captions, processor, num_samples=args.max_val_samples, val_samples_per_scene=args.val_samples_per_scene)
 print(f"Prepared validation dataset with {num_val_pairs} pairs")
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
                         num_workers=2, pin_memory=True, collate_fn=collate_fn)

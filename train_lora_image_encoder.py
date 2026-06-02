@@ -27,17 +27,28 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train LoRA image encoder")
     parser.add_argument("--dataroot", type=str, default="/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/data/sets/nuScenes/trainval", help="Path to nuScenes dataset")
     parser.add_argument("--text_emb_path", type=str, default="./camera_text_embeddings_llm2clip_openai_l14_336_train750_motion_map.pth", help="Path to text embeddings")
+    parser.add_argument("--val_text_emb_path", type=str, default=None, help="Path to validation text embeddings (optional)")
     parser.add_argument("--output_lora_dir", type=str, default="./lora_image_encoder_nuscenes", help="Path to output LoRA directory")
+    parser.add_argument("--validate_every", type=int, default=1, help="Run validation every N epochs")
+    parser.add_argument("--max_train_samples", type=int, default=-1,
+        help="Max training samples (-1 = all)")
+    parser.add_argument("--max_val_samples", type=int, default=-1,
+        help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1,
+        help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
 
 NUSCENES_DATAROOT = args.dataroot
 TEXT_EMB_PATH = args.text_emb_path  # ← вы должны сначала создать этот файл
+VAL_TEXT_EMB_PATH = args.val_text_emb_path
 OUTPUT_LORA_DIR = args.output_lora_dir
+VALIDATE_EVERY = args.validate_every
 BATCH_SIZE = 16
 LR = 1e-4
 EPOCHS = 3
+TEMPERATURE = 0.07
 
 # === Загрузка текстовых эмбеддингов (предвычисленных) ===
 print("Loading precomputed text embeddings...")
@@ -51,12 +62,12 @@ train_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in train_scenes:
         current = scene["first_sample_token"]
-        while current != "" and len(train_sample_tokens) < 750:
+        while current != "":
             train_sample_tokens.append(current)
             current = nusc.get("sample", current)["next"]
-        if len(train_sample_tokens) >= 750:
-            break
-train_sample_tokens = train_sample_tokens[:750]
+
+if args.max_train_samples > 0:
+    train_sample_tokens = train_sample_tokens[:args.max_train_samples]
 print(f"Selected {len(train_sample_tokens)} train samples.")
 
 # === Собираем список (sample_token, cam) с эмбеддингами ===
@@ -70,6 +81,12 @@ for sample_token in train_sample_tokens:
             train_pairs.append((sample_token, cam))
 
 print(f"Total training pairs: {len(train_pairs)}")
+
+if len(train_pairs) == 0:
+    raise ValueError(
+        "No training pairs found. Ensure --text_emb_path contains train-split embeddings "
+        "(e.g. produced with encode_camera_aware_captions_llm2clip.py --split train)."
+    )
 
 # === Датасет ===
 class NuScenesImageTextDataset(Dataset):
@@ -120,7 +137,9 @@ lora_config = LoraConfig(
 )
 vision_model = get_peft_model(vision_model, lora_config)
 vision_model.print_trainable_parameters()
-visual_projection = torch.nn.Linear(1024, 1280).cuda()
+# Проекция будет инициализирована динамически при первом батче,
+# если размерности image/text эмбеддингов не совпадают.
+visual_projection = None
 vision_model.cuda()
 optimizer = torch.optim.AdamW(vision_model.parameters(), lr=LR)
 
@@ -128,8 +147,88 @@ optimizer = torch.optim.AdamW(vision_model.parameters(), lr=LR)
 dataset = NuScenesImageTextDataset(nusc, train_pairs, text_embs, processor)
 dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
 
+# === Валидационный датасет (опционально) ===
+val_dataloader = None
+if VAL_TEXT_EMB_PATH:
+    print("Loading validation text embeddings...")
+    val_text_embs = torch.load(VAL_TEXT_EMB_PATH, map_location="cpu")
+
+    val_scenes = set(create_splits_scenes()["val"])
+    val_sample_tokens = []
+    for scene in nusc.scene:
+        if scene["name"] in val_scenes:
+            scene_tokens = []
+            current = scene["first_sample_token"]
+            while current != "":
+                scene_tokens.append(current)
+                current = nusc.get("sample", current)["next"]
+            if args.val_samples_per_scene > 0:
+                step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+                scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+            val_sample_tokens.extend(scene_tokens)
+
+    if args.max_val_samples > 0:
+        val_sample_tokens = val_sample_tokens[:args.max_val_samples]
+
+    val_pairs = []
+    for sample_token in val_sample_tokens:
+        if sample_token not in val_text_embs:
+            continue
+        for cam in ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT",
+                    "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]:
+            if cam in val_text_embs[sample_token]:
+                val_pairs.append((sample_token, cam))
+
+    print(f"Validation pairs: {len(val_pairs)}")
+    if len(val_pairs) > 0:
+        val_dataset = NuScenesImageTextDataset(nusc, val_pairs, val_text_embs, processor)
+        val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+
+
+def run_validation(vision_model, visual_projection, val_dataloader):
+    vision_model.eval()
+    all_img = []
+    all_txt = []
+    total_val_loss = 0.0
+    total_batches = 0
+
+    with torch.no_grad():
+        for images, text_embs_gt in tqdm(val_dataloader, desc="Validation", leave=False):
+            images = images.cuda(non_blocking=True)
+            text_embs_gt = text_embs_gt.cuda(non_blocking=True)
+
+            image_features = vision_model.get_image_features(images)
+            image_features = visual_projection(image_features.float())
+            image_features = torch.nn.functional.normalize(image_features, p=2, dim=-1)
+            text_embs_gt = torch.nn.functional.normalize(text_embs_gt.float(), p=2, dim=-1)
+
+            logits = (image_features @ text_embs_gt.T) / TEMPERATURE
+            labels = torch.arange(len(images), device=images.device)
+            loss_i2t = torch.nn.functional.cross_entropy(logits, labels)
+            loss_t2i = torch.nn.functional.cross_entropy(logits.T, labels)
+            val_loss = (loss_i2t + loss_t2i) / 2
+
+            total_val_loss += val_loss.item()
+            total_batches += 1
+
+            all_img.append(image_features.cpu())
+            all_txt.append(text_embs_gt.cpu())
+
+    img = torch.cat(all_img)
+    txt = torch.cat(all_txt)
+    sim = img @ txt.T
+
+    i2t_r1 = (sim.argmax(dim=1) == torch.arange(len(sim))).float().mean().item()
+    t2i_r1 = (sim.argmax(dim=0) == torch.arange(len(sim))).float().mean().item()
+    avg_val_loss = total_val_loss / max(total_batches, 1)
+
+    vision_model.train()
+    return i2t_r1, t2i_r1, avg_val_loss
+
 # === Обучение ===
 vision_model.train()
+best_val_loss = float("inf")
+best_epoch = -1
 for epoch in range(EPOCHS):
     total_loss = 0
     for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{EPOCHS}"):
@@ -139,19 +238,50 @@ for epoch in range(EPOCHS):
 
         optimizer.zero_grad()
         image_features = vision_model.get_image_features(images)  # [B, 1024]
-        # image_features = visual_projection(image_embeds)     
-        image_features = torch.nn.functional.normalize(image_features, p=2, dim=-1)
-        text_embs_gt = torch.nn.functional.normalize(text_embs_gt, p=2, dim=-1)
+        if visual_projection is None:
+            img_dim = image_features.shape[-1]
+            txt_dim = text_embs_gt.shape[-1]
+            if img_dim != txt_dim:
+                visual_projection = torch.nn.Linear(img_dim, txt_dim).cuda()
+                optimizer.add_param_group({"params": visual_projection.parameters(), "lr": LR})
+                print(f"Initialized visual projection: {img_dim} -> {txt_dim}")
+            else:
+                visual_projection = torch.nn.Identity().cuda()
+                print(f"Projection not required: image/text dim = {img_dim}")
 
-        # Cosine similarity loss (maximize similarity)
-        cos_sim = torch.sum(image_features * text_embs_gt, dim=1)  # [B]
-        loss = (1 - cos_sim).mean()
+        image_features = visual_projection(image_features.float())
+        image_features = torch.nn.functional.normalize(image_features, p=2, dim=-1)
+        text_embs_gt = torch.nn.functional.normalize(text_embs_gt.float(), p=2, dim=-1)
+
+        # InfoNCE (симметричный CLIP-лосс)
+        logits = (image_features @ text_embs_gt.T) / TEMPERATURE  # [B, B]
+        labels = torch.arange(len(images), device=images.device)
+        loss_i2t = torch.nn.functional.cross_entropy(logits, labels)
+        loss_t2i = torch.nn.functional.cross_entropy(logits.T, labels)
+        loss = (loss_i2t + loss_t2i) / 2
 
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
     print(f"Epoch {epoch+1} Loss: {total_loss/len(dataloader):.4f}")
 
+    if val_dataloader is not None and ((epoch + 1) % VALIDATE_EVERY == 0 or epoch == EPOCHS - 1):
+        i2t_r1, t2i_r1, val_loss = run_validation(vision_model, visual_projection, val_dataloader)
+        print(f"Validation epoch {epoch+1}: loss={val_loss:.4f}, I->T R@1={i2t_r1:.4f}, T->I R@1={t2i_r1:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            best_dir = OUTPUT_LORA_DIR + "_best"
+            os.makedirs(best_dir, exist_ok=True)
+            vision_model.save_pretrained(best_dir)
+            torch.save(visual_projection.state_dict(), os.path.join(best_dir, "visual_projection.pt"))
+            print(f"New best model (val loss) saved to {best_dir}")
+
 # === Сохранение LoRA ===
 vision_model.save_pretrained(OUTPUT_LORA_DIR)
+torch.save(visual_projection.state_dict(), os.path.join(OUTPUT_LORA_DIR, "visual_projection.pt"))
 print(f"LoRA adapter saved to {OUTPUT_LORA_DIR}")
+
+if best_epoch > 0:
+    print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")

@@ -20,6 +20,8 @@ def parse_args():
     parser.add_argument("--camera_captions_path", type=str, default="./camera_aware_captions_motion_map.json", help="Path to camera captions")
     parser.add_argument("--output_path", type=str, default="./camera_text_embeddings_llm2clip_openai_l14_336_motion_map4.pth", help="Path to output embeddings")
     parser.add_argument("--lora_path", type=str, default=None, help="Path to LoRA adapter")
+    parser.add_argument("--split", type=str, default="val", choices=["train", "val"], help="nuScenes split to encode")
+    parser.add_argument("--max_samples", type=int, default=150, help="Maximum number of samples to encode")
     return parser.parse_args()
 
 args = parse_args()
@@ -55,26 +57,26 @@ llm_model = AutoModel.from_pretrained(
 llm_model.config._name_or_path = "meta-llama/Meta-Llama-3-8B-Instruct"
 l2v = LLM2Vec(llm_model, tokenizer, pooling_mode="mean", max_length=512, doc_max_length=512)
 
-# === Подготовка nuScenes (150 val samples) ===
+# === Подготовка nuScenes samples ===
 nusc = NuScenes(version='v1.0-trainval', dataroot=nuscenes_dataroot, verbose=False)
-val_scenes = set(create_splits_scenes()["val"])
+split_scenes = set(create_splits_scenes()[args.split])
 
-val_sample_tokens = []
+sample_tokens = []
 for scene in nusc.scene:
-    if scene["name"] in val_scenes:
+    if scene["name"] in split_scenes:
         current_sample_token = scene["first_sample_token"]
-        while current_sample_token != "" and len(val_sample_tokens) < 150:
-            val_sample_tokens.append(current_sample_token)
+        while current_sample_token != "" and len(sample_tokens) < args.max_samples:
+            sample_tokens.append(current_sample_token)
             current_sample_token = nusc.get("sample", current_sample_token)["next"]
-        if len(val_sample_tokens) >= 150:
+        if len(sample_tokens) >= args.max_samples:
             break
-val_sample_tokens = val_sample_tokens[:150]
-print(f"Selected {len(val_sample_tokens)} validation samples.")
+sample_tokens = sample_tokens[:args.max_samples]
+print(f"Selected {len(sample_tokens)} {args.split} samples.")
 
 # === Генерация текстовых эмбеддингов ===
 camera_text_embs = {}
 
-for sample_token in tqdm(val_sample_tokens, desc="Encoding with LLM2CLIP"):
+for sample_token in tqdm(sample_tokens, desc="Encoding with LLM2CLIP"):
     if sample_token not in camera_captions:
         continue
     cam_dict = camera_captions[sample_token]

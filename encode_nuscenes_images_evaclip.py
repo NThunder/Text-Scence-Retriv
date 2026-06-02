@@ -1,6 +1,7 @@
 # tools/encode_nuscenes_images_evaclip.py
 import os
 import torch
+import argparse
 from PIL import Image
 import sys
 sys.path.insert(0, "/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/EVA/EVA-CLIP/rei")
@@ -9,8 +10,19 @@ from nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
 from tqdm import tqdm
 
-nuscenes_dataroot = "/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/data/sets/nuScenes/trainval"
-output_path = "./camera_image_embeddings_evaclip_val150.pth"
+def parse_args():
+    parser = argparse.ArgumentParser(description="Encode nuScenes images with EVA-CLIP-B/16")
+    parser.add_argument("--dataroot", type=str, default="/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/data/sets/nuScenes/trainval")
+    parser.add_argument("--output_path", type=str, default="./camera_image_embeddings_evaclip_val150.pth")
+    parser.add_argument("--max_val_samples", type=int, default=-1,
+        help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1,
+        help="Number of evenly spaced samples per validation scene (-1 = all)")
+    return parser.parse_args()
+
+args = parse_args()
+nuscenes_dataroot = args.dataroot
+output_path = args.output_path
 
 # Инициализация nuScenes и выбор val-сцен
 nusc = NuScenes(version='v1.0-trainval', dataroot=nuscenes_dataroot, verbose=False)
@@ -19,13 +31,18 @@ val_scenes = set(create_splits_scenes()["val"])
 val_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in val_scenes:
+        scene_tokens = []
         current_sample_token = scene["first_sample_token"]
-        while current_sample_token != "" and len(val_sample_tokens) < 150:
-            val_sample_tokens.append(current_sample_token)
+        while current_sample_token != "":
+            scene_tokens.append(current_sample_token)
             current_sample_token = nusc.get("sample", current_sample_token)["next"]
-        if len(val_sample_tokens) >= 150:
-            break
-val_sample_tokens = val_sample_tokens[:150]
+        if args.val_samples_per_scene > 0:
+            step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+            scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+        val_sample_tokens.extend(scene_tokens)
+
+if args.max_val_samples > 0:
+    val_sample_tokens = val_sample_tokens[:args.max_val_samples]
 print(f"Selected {len(val_sample_tokens)} validation samples for image encoding.")
 
 # Загрузка модели

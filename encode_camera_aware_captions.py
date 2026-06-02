@@ -1,74 +1,72 @@
-# tools/encode_camera_aware_captions.py
 import json
 import torch
+import argparse
 from transformers import CLIPTextModel, CLIPTokenizer
 from nuscenes import NuScenes
+from nuscenes.utils.splits import create_splits_scenes
 from tqdm import tqdm
 
-nuscenes_dataroot = "./"
-camera_captions_path = f"{nuscenes_dataroot}/camera_aware_captions_motion_map.json"
-output_path = f"{nuscenes_dataroot}/camera_text_embeddings_motion_map_clip.pth"
+def parse_args():
+    parser = argparse.ArgumentParser(description="Encode camera captions with any HF model")
+    parser.add_argument("--model_name", type=str, default="openai/clip-vit-base-patch32")
+    parser.add_argument("--dataroot", type=str, default="/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/data/sets/nuScenes/trainval")
+    parser.add_argument("--camera_captions_path", type=str, default="./camera_aware_captions_motion_map.json")
+    parser.add_argument("--output_path", type=str, default="./camera_text_embeddings_clip.pth")
+    parser.add_argument("--max_val_samples", type=int, default=-1,
+        help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1,
+        help="Number of evenly spaced samples per validation scene (-1 = all)")
+    return parser.parse_args()
 
-with open(camera_captions_path, "r") as f:
+args = parse_args()
+
+print(f"Loading tokenizer and model: {args.model_name}")
+tokenizer = CLIPTokenizer.from_pretrained(args.model_name)
+text_encoder = CLIPTextModel.from_pretrained(args.model_name).eval().cuda()
+
+with open(args.camera_captions_path, "r") as f:
     camera_captions = json.load(f)
 
-tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
-text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").eval().cuda()
+nusc = NuScenes(version='v1.0-trainval', dataroot=args.dataroot, verbose=False)
 
-nusc = NuScenes(version='v1.0-trainval', dataroot="/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/data/sets/nuScenes/trainval", verbose=False)
+val_scenes = set(create_splits_scenes()["val"])
+val_sample_tokens = []
+for scene in nusc.scene:
+    if scene["name"] in val_scenes:
+        scene_tokens = []
+        current = scene["first_sample_token"]
+        while current != "":
+            scene_tokens.append(current)
+            current = nusc.get("sample", current)["next"]
+        if args.val_samples_per_scene > 0:
+            step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+            scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+        val_sample_tokens.extend(scene_tokens)
 
-camera_text_embs = {}  # {sample_token: {cam_name: emb}}
+if args.max_val_samples > 0:
+    val_sample_tokens = val_sample_tokens[:args.max_val_samples]
+print(f"Selected {len(val_sample_tokens)} validation samples.")
 
-for scene in tqdm(nusc.scene):
-    current_sample_token = scene["first_sample_token"]
-    while current_sample_token != "":
-        if current_sample_token not in camera_captions:
-            current_sample_token = nusc.get("sample", current_sample_token)["next"]
+camera_text_embs = {}
+
+for sample_token in tqdm(val_sample_tokens, desc="Encoding text"):
+    if sample_token not in camera_captions:
+        continue
+    cam_dict = camera_captions[sample_token]
+    embs_dict = {}
+
+    for cam_name, captions in cam_dict.items():
+        if not captions:
             continue
+        scene_text = "The camera view contains: " + "; ".join(captions)
 
-        cam_dict = camera_captions[current_sample_token]
-        embs_dict = {}
+        inputs = tokenizer(scene_text, return_tensors="pt", padding=True, truncation=True, max_length=77).to("cuda")
+        with torch.no_grad():
+            outputs = text_encoder(**inputs)
+            emb = outputs.pooler_output.squeeze(0).cpu()
+        embs_dict[cam_name] = emb
 
-        for cam_name, captions in cam_dict.items():
-            if captions:
-                scene_text = "The camera view contains: " + "; ".join(captions)
-            else:
-                continue
+    camera_text_embs[sample_token] = embs_dict
 
-            inputs = tokenizer(scene_text, return_tensors="pt", padding=True, truncation=True, max_length=77).to("cuda")
-            with torch.no_grad():
-                emb = text_encoder(**inputs).pooler_output.squeeze(0).cpu()
-            embs_dict[cam_name] = emb
-
-        camera_text_embs[current_sample_token] = embs_dict
-        current_sample_token = nusc.get("sample", current_sample_token)["next"]
-
-torch.save(camera_text_embs, output_path)
-print(f"Saved to {output_path}")
-
-# === Отладка: вывод примеров ===
-
-# import os
-
-# print("\n=== Примеры (изображение + текст) ===")
-# count = 0
-# for sample_token, cam_dict in camera_captions.items():
-#     if count >= 3:  # покажем 3 примера
-#         break
-#     print(f"\nSample Token: {sample_token}")
-    
-#     # Получим путь к изображению (например, CAM_FRONT)
-#     sample = nusc.get("sample", sample_token)
-#     cam_token = sample["data"]["CAM_FRONT"]
-#     cam_data = nusc.get("sample_data", cam_token)
-#     img_path = os.path.join(nuscenes_dataroot, cam_data["filename"])
-#     print(f"Image path: {img_path}")
-    
-#     # Текстовое описание для CAM_FRONT
-#     if "CAM_FRONT" in cam_dict and cam_dict["CAM_FRONT"]:
-#         text = "The camera view contains: " + "; ".join(cam_dict["CAM_FRONT"])
-#         print(f"Text: {text}")
-#     else:
-#         print("Text: (no objects)")
-    
-#     count += 1
+torch.save(camera_text_embs, args.output_path)
+print(f"Saved to {args.output_path}")

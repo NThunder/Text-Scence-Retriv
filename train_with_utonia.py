@@ -54,6 +54,15 @@ def parse_args():
     parser.add_argument("--num_experts", type=int, default=4, help="Number of experts (for MoE fusion)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from")
     parser.add_argument("--log_interval", type=int, default=10)
+    parser.add_argument("--temporal_window", type=int, default=10, help="Temporal window for relevance")
+    parser.add_argument("--disable_temporal_relevance", action="store_true", help="Disable temporal neighbors in relevance")
+    parser.add_argument("--relevance_mode", type=str, default="any", choices=["any", "all"],
+                        help="Relevance by attributes: any(shared attr) or all(query attrs subset of candidate attrs)")
+    parser.add_argument("--max_train_samples", type=int, default=-1,
+        help="Max training samples (-1 = all)")
+    parser.add_argument("--max_val_samples", type=int, default=-1,
+        help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1, help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
@@ -81,12 +90,12 @@ train_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in train_scenes:
         current = scene["first_sample_token"]
-        while current != "" and len(train_sample_tokens) < 750:
+        while current != "":
             train_sample_tokens.append(current)
             current = nusc.get("sample", current)["next"]
-        if len(train_sample_tokens) >= 750:
-            break
-train_sample_tokens = train_sample_tokens[:750]
+
+if args.max_train_samples > 0:
+    train_sample_tokens = train_sample_tokens[:args.max_train_samples]
 print(f"Selected {len(train_sample_tokens)} train samples.")
 
 # ========== 3. Сбор пар ==========
@@ -331,18 +340,23 @@ train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=Tru
                           num_workers=4, pin_memory=True, collate_fn=collate_fn)
 
 # ========== 8. Подготовка валидации ==========
-def prepare_val_dataset(nusc, camera_captions, processor, num_samples=150):
+def prepare_val_dataset(nusc, camera_captions, processor, num_samples=150, val_samples_per_scene=-1):
     val_scenes = set(create_splits_scenes()["val"])
     val_sample_tokens = []
     for scene in nusc.scene:
         if scene["name"] in val_scenes:
+            scene_tokens = []
             current = scene["first_sample_token"]
-            while current != "" and len(val_sample_tokens) < num_samples:
-                val_sample_tokens.append(current)
+            while current != "":
+                scene_tokens.append(current)
                 current = nusc.get("sample", current)["next"]
-            if len(val_sample_tokens) >= num_samples:
-                break
-    val_sample_tokens = val_sample_tokens[:num_samples]
+            if val_samples_per_scene > 0:
+                step = max(1, len(scene_tokens) // val_samples_per_scene)
+                scene_tokens = scene_tokens[::step][:val_samples_per_scene]
+            val_sample_tokens.extend(scene_tokens)
+
+    if num_samples > 0:
+        val_sample_tokens = val_sample_tokens[:num_samples]
 
     val_pairs = []
     for sample_token in val_sample_tokens:
@@ -354,7 +368,7 @@ def prepare_val_dataset(nusc, camera_captions, processor, num_samples=150):
                 val_pairs.append((sample_token, cam, scene_text))
     return JointNuScenesDataset(nusc, val_pairs, processor), len(val_pairs)
 
-val_dataset, num_val_pairs = prepare_val_dataset(nusc, camera_captions, processor, num_samples=150)
+val_dataset, num_val_pairs = prepare_val_dataset(nusc, camera_captions, processor, num_samples=args.max_val_samples, val_samples_per_scene=args.val_samples_per_scene)
 print(f"Prepared validation dataset with {num_val_pairs} pairs")
 val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=2, pin_memory=True, collate_fn=collate_fn)
@@ -594,11 +608,13 @@ def validate(vision_model, text_model, point_model, clip_model, point_proj, fusi
         local_index[(token, cam)] = idx
     
     # Attributes for relevance
+    attrs_by_idx = []
     attr_to_indices = defaultdict(set)
     for idx, (token, cam) in enumerate(zip(all_sample_tokens, all_cameras)):
-        if token in camera_captions and cam in camera_captions[token]:
-            for attr in camera_captions[token][cam]:
-                attr_to_indices[attr].add(idx)
+        attrs = set(camera_captions.get(token, {}).get(cam, []))
+        attrs_by_idx.append(attrs)
+        for attr in attrs:
+            attr_to_indices[attr].add(idx)
     
     similarity = all_fused_embs @ all_txt_embs.T
     ranks = []
@@ -607,17 +623,27 @@ def validate(vision_model, text_model, point_model, clip_model, point_proj, fusi
         sample_token, cam = all_sample_tokens[i], all_cameras[i]
         
         relevant = set()
-        if sample_token in camera_captions and cam in camera_captions[sample_token]:
-            for attr in camera_captions[sample_token][cam]:
+        query_attrs = attrs_by_idx[i]
+
+        if args.relevance_mode == "any":
+            for attr in query_attrs:
                 relevant.update(attr_to_indices[attr])
-        
-        current = sample_token
-        for _ in range(10):
-            current = sample_to_next.get(current, "")
-            if not current:
-                break
-            if (current, cam) in local_index:
-                relevant.add(local_index[(current, cam)])
+        else:  # all
+            if len(query_attrs) == 0:
+                relevant.add(i)
+            else:
+                for j, cand_attrs in enumerate(attrs_by_idx):
+                    if query_attrs.issubset(cand_attrs):
+                        relevant.add(j)
+
+        if not args.disable_temporal_relevance:
+            current = sample_token
+            for _ in range(args.temporal_window):
+                current = sample_to_next.get(current, "")
+                if not current:
+                    break
+                if (current, cam) in local_index:
+                    relevant.add(local_index[(current, cam)])
         
         sorted_indices = torch.argsort(similarity[i], descending=True)
         found = False
@@ -638,7 +664,8 @@ def validate(vision_model, text_model, point_model, clip_model, point_proj, fusi
     print(f"\n{'='*70}")
     print(f"Validation Results (Epoch {epoch+1})")
     print(f"{'='*70}")
-    print(f"Fused → Text:")
+    temporal_desc = f"temporal_window={args.temporal_window}" if not args.disable_temporal_relevance else "temporal=off"
+    print(f"Fused → Text (relevance_mode={args.relevance_mode}, {temporal_desc}):")
     print(f"  R@1:  {r1:.4f}")
     print(f"  R@5:  {r5:.4f}")
     print(f"  R@10: {r10:.4f}")
@@ -865,7 +892,10 @@ final_results = {
     'final_r5': history.val_r5[-1] if history.val_r5 else 0,
     'final_r10': history.val_r10[-1] if history.val_r10 else 0,
     'final_mrr': history.val_mrr[-1] if history.val_mrr else 0,
-    'fusion_type': args.fusion_type
+    'fusion_type': args.fusion_type,
+    'relevance_mode': args.relevance_mode,
+    'temporal_enabled': not args.disable_temporal_relevance,
+    'temporal_window': args.temporal_window
 }
 
 with open(f"{args.output_logs}/final_results.json", 'w') as f:

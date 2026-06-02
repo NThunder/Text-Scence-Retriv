@@ -27,6 +27,12 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=40, help="Number of epochs")
     parser.add_argument("--temperature", type=float, default=0.07, help="Contrastive loss temperature")
     parser.add_argument("--lora_r", type=int, default=8, help="LoRA rank")
+    parser.add_argument("--validate_every", type=int, default=1, help="Run validation every N epochs")
+    parser.add_argument("--max_train_samples", type=int, default=-1,
+        help="Max training samples (-1 = all)")
+    parser.add_argument("--max_val_samples", type=int, default=-1,
+        help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1, help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
@@ -40,6 +46,7 @@ LR = args.lr
 EPOCHS = args.epochs
 TEMPERATURE = args.temperature
 LORA_R = args.lora_r
+VALIDATE_EVERY = args.validate_every
 
 # === 1. Загрузка описаний сцен ===
 print("Loading camera-aware captions...")
@@ -54,12 +61,12 @@ train_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in train_scenes:
         current = scene["first_sample_token"]
-        while current != "" and len(train_sample_tokens) < 750:
+        while current != "":
             train_sample_tokens.append(current)
             current = nusc.get("sample", current)["next"]
-        if len(train_sample_tokens) >= 750:
-            break
-train_sample_tokens = train_sample_tokens[:750]
+
+if args.max_train_samples > 0:
+    train_sample_tokens = train_sample_tokens[:args.max_train_samples]
 print(f"Selected {len(train_sample_tokens)} train samples.")
 
 # === 3. Сбор тренировочных пар ===
@@ -148,10 +155,11 @@ text_model.print_trainable_parameters()
 
 # === 6. Датасет ===
 class JointNuScenesDataset(Dataset):
-    def __init__(self, nusc, pairs, processor):
+    def __init__(self, nusc, pairs, processor, return_metadata=False):
         self.nusc = nusc
         self.pairs = pairs
         self.processor = processor
+        self.return_metadata = return_metadata
     
     def __len__(self):
         return len(self.pairs)
@@ -167,21 +175,28 @@ class JointNuScenesDataset(Dataset):
         image = Image.open(img_path).convert("RGB")
         image_inputs = self.processor(images=image, return_tensors="pt")["pixel_values"][0]
         
+        if self.return_metadata:
+            return image_inputs, text, sample_token, cam
         return image_inputs, text
 
-def prepare_val_dataset(nusc, camera_captions, num_samples=150):
+def prepare_val_dataset(nusc, camera_captions, num_samples=150, val_samples_per_scene=-1):
     val_scenes = set(create_splits_scenes()["val"])
     val_sample_tokens = []
     for scene in nusc.scene:
         if scene["name"] in val_scenes:
+            scene_tokens = []
             current = scene["first_sample_token"]
-            while current != "" and len(val_sample_tokens) < num_samples:
-                val_sample_tokens.append(current)
+            while current != "":
+                scene_tokens.append(current)
                 current = nusc.get("sample", current)["next"]
-            if len(val_sample_tokens) >= num_samples:
-                break
-    val_sample_tokens = val_sample_tokens[:num_samples]
-    
+            if val_samples_per_scene > 0:
+                step = max(1, len(scene_tokens) // val_samples_per_scene)
+                scene_tokens = scene_tokens[::step][:val_samples_per_scene]
+            val_sample_tokens.extend(scene_tokens)
+
+    if num_samples > 0:
+        val_sample_tokens = val_sample_tokens[:num_samples]
+
     val_pairs = []
     for sample_token in val_sample_tokens:
         if sample_token not in camera_captions:
@@ -190,10 +205,10 @@ def prepare_val_dataset(nusc, camera_captions, num_samples=150):
             if cam in camera_captions[sample_token] and camera_captions[sample_token][cam]:
                 scene_text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
                 val_pairs.append((sample_token, cam, scene_text))
-    
-    return JointNuScenesDataset(nusc, val_pairs, processor), len(val_pairs)
 
-val_dataset, num_val_pairs = prepare_val_dataset(nusc, camera_captions, num_samples=150)
+    return JointNuScenesDataset(nusc, val_pairs, processor, return_metadata=True), len(val_pairs)
+
+val_dataset, num_val_pairs = prepare_val_dataset(nusc, camera_captions, num_samples=args.max_val_samples, val_samples_per_scene=args.val_samples_per_scene)
 print(f"Prepared validation dataset with {num_val_pairs} pairs")
 
 # === 8. Функция валидации ===
@@ -209,34 +224,90 @@ def validate(vision_model, text_model, clip_model, val_dataset, batch_size=16):
     
     all_image_embs = []
     all_text_embs = []
+    all_sample_tokens = []
+    all_cameras = []
+    total_val_loss = 0.0
+    total_batches = 0
     
-    with torch.cuda.amp.autocast(dtype=torch.float16):
-        for images, text_inputs in tqdm(val_loader, desc="Validation", leave=False):
-            images = images.cuda(non_blocking=True)
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            for batch in tqdm(val_loader, desc="Validation", leave=False):
+                images, text_inputs = batch[0], batch[1]
+                images = images.cuda(non_blocking=True)
 
-            image_features = vision_model.get_image_features(images)  # [B, 1024] 
-            img_emb = torch.nn.functional.normalize(image_features, p=2, dim=-1) 
-            
+                image_features = vision_model.get_image_features(images)
+                img_emb = torch.nn.functional.normalize(image_features, p=2, dim=-1)
 
-            text_emb_raw = l2v.encode(text_inputs, convert_to_tensor=True).to('cuda')  # [1, 4096]
-            text_emb_clip = clip_model.get_text_features(text_emb_raw.float())  # [1, 768]
-            txt_emb = F.normalize(text_emb_clip, p=2, dim=-1)
-            
-            all_image_embs.append(img_emb.cpu())
-            all_text_embs.append(txt_emb.cpu())
+                text_emb_raw = l2v.encode(text_inputs, convert_to_tensor=True).to('cuda')
+                text_emb_clip = clip_model.get_text_features(text_emb_raw.float())
+                txt_emb = F.normalize(text_emb_clip, p=2, dim=-1)
+
+                logits_per_image = (img_emb @ txt_emb.T) / TEMPERATURE
+                logits_per_text = logits_per_image.T
+                labels = torch.arange(len(images), device=images.device)
+                loss_i2t = F.cross_entropy(logits_per_image, labels)
+                loss_t2i = F.cross_entropy(logits_per_text, labels)
+                val_loss = (loss_i2t + loss_t2i) / 2
+
+                total_val_loss += val_loss.item()
+                total_batches += 1
+
+                all_image_embs.append(img_emb.cpu())
+                all_text_embs.append(txt_emb.cpu())
+                if len(batch) > 2:
+                    all_sample_tokens.extend(batch[2])
+                    all_cameras.extend(batch[3])
     
     all_image_embs = torch.cat(all_image_embs)
     all_text_embs = torch.cat(all_text_embs)
     
-    # Вычисление метрик
+    # Стандартные метрики (exact match)
     sim_matrix = all_image_embs @ all_text_embs.T
     i2t_r1 = (sim_matrix.argmax(dim=1) == torch.arange(len(sim_matrix))).float().mean().item()
     t2i_r1 = (sim_matrix.argmax(dim=0) == torch.arange(len(sim_matrix))).float().mean().item()
     
+    # Метрики с учётом атрибутов (any mode, без temporal)
+    attr_r1, attr_r5, attr_r10, attr_mrr = 0.0, 0.0, 0.0, 0.0
+    if all_sample_tokens:
+        local_index = {}
+        for idx, (token, cam) in enumerate(zip(all_sample_tokens, all_cameras)):
+            local_index[(token, cam)] = idx
+        
+        attr_to_indices = defaultdict(set)
+        for idx, (token, cam) in enumerate(zip(all_sample_tokens, all_cameras)):
+            if token in camera_captions and cam in camera_captions[token]:
+                for attr in camera_captions[token][cam]:
+                    attr_to_indices[attr].add(idx)
+        
+        ranks = []
+        for i in range(len(all_sample_tokens)):
+            sample_token, cam = all_sample_tokens[i], all_cameras[i]
+            relevant = set()
+            if sample_token in camera_captions and cam in camera_captions[sample_token]:
+                for attr in camera_captions[sample_token][cam]:
+                    relevant.update(attr_to_indices[attr])
+            sorted_indices = torch.argsort(sim_matrix[i], descending=True)
+            found = False
+            for rank_pos, idx in enumerate(sorted_indices.tolist()):
+                if idx in relevant:
+                    ranks.append(rank_pos + 1)
+                    found = True
+                    break
+            if not found:
+                ranks.append(len(all_sample_tokens))
+        
+        ranks = np.array(ranks)
+        attr_r1 = np.mean(ranks <= 1)
+        attr_r5 = np.mean(ranks <= 5)
+        attr_r10 = np.mean(ranks <= 10)
+        attr_mrr = np.mean(1.0 / ranks)
+    
     vision_model.train()
     text_model.train()
     
-    return i2t_r1, t2i_r1, sim_matrix
+    avg_val_loss = total_val_loss / max(total_batches, 1)
+
+    return i2t_r1, t2i_r1, attr_r1, attr_r5, attr_r10, attr_mrr, sim_matrix, avg_val_loss
 
 
 
@@ -257,8 +328,8 @@ optimizer = torch.optim.AdamW(params, lr=LR)
 print(f"\n=== Starting joint training for {EPOCHS} epochs ===")
 print(f"Batch size: {BATCH_SIZE}, LR: {LR}, Temperature: {TEMPERATURE}")
 
-
-VALIDATE_EVERY = 1
+best_val_loss = float("inf")
+best_epoch = -1
 
 for epoch in range(EPOCHS):
     vision_model.train()
@@ -276,18 +347,17 @@ for epoch in range(EPOCHS):
             # --- Визуальные эмбеддинги (как в оригинальном скрипте) ---
             # Получаем 1024-dim features от vision encoder
             
-            image_features = vision_model.get_image_features(images)  # [B, 1024] 
-            image_features_1024 = torch.nn.functional.normalize(image_features, p=2, dim=-1) 
+            image_features = vision_model.get_image_features(images)
+            image_features = torch.nn.functional.normalize(image_features, p=2, dim=-1)
             
             # --- Текстовые эмбеддинги (как в оригинальном скрипте) ---
             # Получаем 4096-dim features от LLM2Vec
 
             text_emb_raw = l2v.encode(text_inputs, convert_to_tensor=True).to('cuda')  # [1, 4096]
-            text_emb_clip = clip_model.get_text_features(text_emb_raw)  # [1, 768]
+            text_emb_clip = clip_model.get_text_features(text_emb_raw.float())
             text_features = torch.nn.functional.normalize(text_emb_clip, p=2, dim=-1)
             
             # --- Симметричный контрастивный лосс ---
-            print("image_features:  ", image_features.shape, text_features.shape)
             logits_per_image = (image_features @  text_features.T) / TEMPERATURE
             logits_per_text = logits_per_image.T
             
@@ -316,40 +386,41 @@ for epoch in range(EPOCHS):
     avg_t2i_acc = total_t2i_acc / len(dataloader)
     
     print(f"Epoch {epoch+1} | Loss: {avg_loss:.4f} | I→T Acc: {avg_i2t_acc:.2%} | T→I Acc: {avg_t2i_acc:.2%}")
-    # Валидация каждые N эпох и на последней эпохе
-    # if (epoch + 1) % VALIDATE_EVERY == 0 or epoch == EPOCHS - 1:
-    #     print(f"\n{'='*50}")
-    #     print(f"Running validation at epoch {epoch+1}...")
-    #     print(f"{'='*50}")
-        
-    #     i2t_r1, t2i_r1, sim_matrix = validate(
-    #         vision_model, text_model, clip_model, val_dataset, batch_size=BATCH_SIZE
-    #     )
-        
-    #     mean_pos_sim = torch.diag(sim_matrix).mean().item()
-    #     mean_neg_sim = (sim_matrix.sum() - torch.diag(sim_matrix).sum()) / (len(sim_matrix) * (len(sim_matrix) - 1))
-        
-    #     print(f"\nValidation Results (epoch {epoch+1}):")
-    #     print(f"  I→T R@1: {i2t_r1:.2%}")
-    #     print(f"  T→I R@1: {t2i_r1:.2%}")
-    #     print(f"  Mean positive similarity: {mean_pos_sim:.4f}")
-    #     print(f"  Mean negative similarity: {mean_neg_sim:.4f}")
-    #     print(f"  Separation gap: {mean_pos_sim - mean_neg_sim:.4f}")
-        
-    #     # Сохранение лучшей модели
-    #     if i2t_r1 > best_i2t_r1:
-    #         best_i2t_r1 = i2t_r1
-    #         best_epoch = epoch + 1
-    #         print(f"  🏆 New best I→T R@1! Saving checkpoint...")
-            
-    #         # Сохраняем адаптеры лучшей модели
-    #         vision_model.save_pretrained(OUTPUT_LORA_IMAGE + "_best")
-    #         processor.save_pretrained(OUTPUT_LORA_IMAGE + "_best")
-    #         text_model.save_pretrained(OUTPUT_LORA_TEXT + "_best")
-    #         tokenizer.save_pretrained(OUTPUT_LORA_TEXT + "_best")
-    #         print(f"  Best model saved to {OUTPUT_LORA_IMAGE}_best and {OUTPUT_LORA_TEXT}_best")
-        
-    #     print(f"{'='*50}\n")
+
+    if len(val_dataset) > 0 and ((epoch + 1) % VALIDATE_EVERY == 0 or epoch == EPOCHS - 1):
+        print(f"\n{'='*50}")
+        print(f"Running validation at epoch {epoch+1}...")
+        print(f"{'='*50}")
+
+        i2t_r1, t2i_r1, attr_r1, attr_r5, attr_r10, attr_mrr, sim_matrix, val_loss = validate(
+            vision_model, text_model, clip_model, val_dataset, batch_size=BATCH_SIZE
+        )
+
+        mean_pos_sim = torch.diag(sim_matrix).mean().item()
+        mean_neg_sim = (sim_matrix.sum() - torch.diag(sim_matrix).sum()) / (len(sim_matrix) * (len(sim_matrix) - 1))
+
+        print(f"\nValidation Results (epoch {epoch+1}):")
+        print(f"  Val loss: {val_loss:.4f}")
+        print(f"  I→T R@1 (exact): {i2t_r1:.2%}")
+        print(f"  T→I R@1 (exact): {t2i_r1:.2%}")
+        print(f"  Attribute-based (any, no temporal):")
+        print(f"    R@1: {attr_r1:.4f}  R@5: {attr_r5:.4f}  R@10: {attr_r10:.4f}  MRR: {attr_mrr:.4f}")
+        print(f"  Mean positive similarity: {mean_pos_sim:.4f}")
+        print(f"  Mean negative similarity: {mean_neg_sim:.4f}")
+        print(f"  Separation gap: {mean_pos_sim - mean_neg_sim:.4f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            print("  New best validation loss! Saving checkpoint...")
+
+            vision_model.save_pretrained(OUTPUT_LORA_IMAGE + "_best")
+            processor.save_pretrained(OUTPUT_LORA_IMAGE + "_best")
+            text_model.save_pretrained(OUTPUT_LORA_TEXT + "_best")
+            tokenizer.save_pretrained(OUTPUT_LORA_TEXT + "_best")
+            print(f"  Best model saved to {OUTPUT_LORA_IMAGE}_best and {OUTPUT_LORA_TEXT}_best")
+
+        print(f"{'='*50}\n")
 
 # === 11. Сохранение финальных адаптеров ===
 print("\n=== Saving final LoRA adapters ===")
@@ -361,4 +432,7 @@ text_model.save_pretrained(OUTPUT_LORA_TEXT)
 tokenizer.save_pretrained(OUTPUT_LORA_TEXT)
 print(f"Final text LoRA saved to {OUTPUT_LORA_TEXT}")
 
-print(f"\n✅ Training completed! Best I→T R@1: {best_i2t_r1:.2%} at epoch {best_epoch}")
+if best_epoch > 0:
+    print(f"\n✅ Training completed! Best val loss: {best_val_loss:.4f} at epoch {best_epoch}")
+else:
+    print("\n✅ Training completed! Validation was not run or no improvement recorded.")

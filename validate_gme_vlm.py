@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 import torch
 import torch.nn.functional as F
@@ -20,9 +20,34 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Validation with GME-VARCO-VISION-Embedding")
     parser.add_argument("--dataroot", type=str, default="/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/data/sets/nuScenes/trainval")
     parser.add_argument("--camera_captions_path", type=str, default="./camera_aware_captions_motion_map.json")
+    parser.add_argument("--relevance_captions_path", type=str, default=None,
+        help="Path to captions used for soft-relevance (atts). "
+             "If None, uses --camera_captions_path. "
+             "Set to camera_aware_captions_short.json to fix relevance at L0 "
+             "while varying query text level.")
+    parser.add_argument("--model_name", type=str, default="NCSOFT/GME-VARCO-VISION-Embedding",
+        help="HuggingFace model name or local path to fine-tuned model (e.g. ./gme_finetuned/best_model)")
     parser.add_argument("--output_logs", type=str, default="./vlm_validation_logs", help="Directory for logs and results")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for image encoding")
     parser.add_argument("--temporal_window", type=int, default=10, help="Temporal window for relevance")
+    parser.add_argument(
+        "--disable_temporal_relevance",
+        action="store_true",
+        help="Disable temporal neighbors in relevance set",
+    )
+    parser.add_argument(
+        "--relevance_mode",
+        type=str,
+        default="any",
+        choices=["any", "all"],
+        help="Attribute relevance mode: any=at least one shared attribute, all=all query attributes must be present",
+    )
+    parser.add_argument("--max_val_samples", type=int, default=-1,
+        help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1,
+        help="Number of evenly spaced samples per validation scene (-1 = all)")
+    parser.add_argument("--filter_pairs", type=str, default=None,
+        help="Path to JSON with list of (sample_token, cam) pairs to use for evaluation")
     return parser.parse_args()
 
 args = parse_args()
@@ -32,14 +57,13 @@ os.makedirs(args.output_logs, exist_ok=True)
 os.makedirs(f"{args.output_logs}/embeddings", exist_ok=True)
 
 # ========== 1. Загрузка модели ==========
-print("Loading GME-VARCO-VISION-Embedding model...")
-model_name = "NCSOFT/GME-VARCO-VISION-Embedding"
+model_name = args.model_name
+print(f"Loading model: {model_name}")
 
 model = Qwen2VLForConditionalGeneration.from_pretrained(
-    model_name, 
+    model_name,
     torch_dtype=torch.bfloat16,
-    attn_implementation="flash_attention_2",
-    device_map="auto",  # Автоматически распределит по 4 GPU
+    device_map="cuda:0",
 )
 
 processor = AutoProcessor.from_pretrained(model_name)
@@ -52,6 +76,18 @@ print("Loading camera-aware captions...")
 with open(args.camera_captions_path, "r") as f:
     camera_captions = json.load(f)
 
+# Captions used for soft-relevance computation (atts field).
+# Can be fixed to L0 (short) while query texts come from a richer level.
+relevance_captions_path = args.relevance_captions_path or args.camera_captions_path
+if relevance_captions_path != args.camera_captions_path:
+    print(f"Loading relevance captions from: {relevance_captions_path}")
+    with open(relevance_captions_path, "r") as f:
+        relevance_captions = json.load(f)
+else:
+    relevance_captions = camera_captions
+print(f"Query captions  : {args.camera_captions_path}")
+print(f"Relevance captions: {relevance_captions_path}")
+
 print("Loading nuScenes...")
 nusc = NuScenes(version='v1.0-trainval', dataroot=args.dataroot, verbose=False)
 
@@ -61,12 +97,20 @@ val_scenes = set(create_splits_scenes()["val"])
 val_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in val_scenes:
+        scene_tokens = []
         current = scene["first_sample_token"]
-        while current != "" and len(val_sample_tokens) < 150:
-            val_sample_tokens.append(current)
+        while current != "":
+            scene_tokens.append(current)
             current = nusc.get("sample", current)["next"]
-        if len(val_sample_tokens) >= 150:
-            break
+
+        if args.val_samples_per_scene > 0:
+            step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+            scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+
+        val_sample_tokens.extend(scene_tokens)
+
+if args.max_val_samples > 0:
+    val_sample_tokens = val_sample_tokens[:args.max_val_samples]
 
 CAMERAS = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT",
            "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
@@ -206,6 +250,28 @@ for sample_token in tqdm(val_sample_tokens, desc="Preparing data"):
 
 print(f"Total pairs: {len(all_texts)}")
 
+# Фильтрация пар (для ablation study: одинаковое множество при разных порогах)
+if args.filter_pairs:
+    print(f"Loading pair filter from {args.filter_pairs}")
+    with open(args.filter_pairs, "r") as f:
+        allowed_pairs = set(tuple(p) for p in json.load(f))
+    filtered_texts = []
+    filtered_text_info = []
+    filtered_image_paths = []
+    filtered_image_info = []
+    for i in range(len(all_texts)):
+        pair = all_text_info[i]
+        if pair in allowed_pairs:
+            filtered_texts.append(all_texts[i])
+            filtered_text_info.append(all_text_info[i])
+            filtered_image_paths.append(all_image_paths[i])
+            filtered_image_info.append(all_image_info[i])
+    all_texts = filtered_texts
+    all_text_info = filtered_text_info
+    all_image_paths = filtered_image_paths
+    all_image_info = filtered_image_info
+    print(f"After filter: {len(all_texts)} pairs")
+
 # Batch обработка текстов
 print("Encoding texts...")
 for i in tqdm(range(0, len(all_texts), args.batch_size)):
@@ -254,8 +320,10 @@ for sample_token in val_sample_tokens:
             image_emb_list.append(image_embeddings[sample_token][cam])
             sample_cam_list.append((sample_token, cam))
 
-text_embs = torch.stack(text_emb_list)
-image_embs = torch.stack(image_emb_list)
+text_embs = torch.stack(text_emb_list).float()
+image_embs = torch.stack(image_emb_list).float()
+text_embs = F.normalize(text_embs, p=2, dim=1)
+image_embs = F.normalize(image_embs, p=2, dim=1)
 
 print(f"Total valid pairs: {len(text_embs)}")
 print(f"Text embeddings shape: {text_embs.shape}")
@@ -267,12 +335,18 @@ similarity = text_embs @ image_embs.T  # [N, N]
 # ========== 7. Создание словарей для релевантности ==========
 print("Building relevance dictionaries...")
 
-# Словарь атрибутов для каждого индекса
+# Словарь атрибутов для каждого индекса.
+# Использует relevance_captions (может быть зафиксировано на L0),
+# а не camera_captions (которые содержат тексты запросов нужного уровня).
 attr_to_indices = defaultdict(set)
+attrs_by_idx = []
 for idx, (sample_token, cam) in enumerate(sample_cam_list):
-    if sample_token in camera_captions and cam in camera_captions[sample_token]:
-        for attr in camera_captions[sample_token][cam]:
+    sample_cam_attrs = set()
+    if sample_token in relevance_captions and cam in relevance_captions[sample_token]:
+        for attr in relevance_captions[sample_token][cam]:
             attr_to_indices[attr].add(idx)
+            sample_cam_attrs.add(attr)
+    attrs_by_idx.append(sample_cam_attrs)
 
 # Словарь для временных соседей
 sample_to_next = {}
@@ -289,31 +363,43 @@ for idx, (token, cam) in enumerate(sample_cam_list):
     sample_cam_to_idx[(token, cam)] = idx
 
 # ========== 8. Вычисление рангов и метрик ==========
-print("Computing ranks with attribute and temporal relevance...")
+temporal_enabled = not args.disable_temporal_relevance
+temporal_desc = f"+ temporal(window={args.temporal_window})" if temporal_enabled else "(temporal disabled)"
+print(f"Computing ranks with attribute relevance mode='{args.relevance_mode}' {temporal_desc}...")
 ranks = []
+rel_sizes = []
 
 for i in tqdm(range(len(text_embs))):
     query_token, query_cam = sample_cam_list[i]
-    
-    # Получаем атрибуты запроса
+
+    # Атрибуты для релевантности берутся из relevance_captions (может быть L0)
     query_attrs = set()
-    if query_token in camera_captions and query_cam in camera_captions[query_token]:
-        query_attrs = set(camera_captions[query_token][query_cam])
-    
+    if query_token in relevance_captions and query_cam in relevance_captions[query_token]:
+        query_attrs = set(relevance_captions[query_token][query_cam])
+
     # Релевантные индексы (по атрибутам)
     relevant = set()
-    for attr in query_attrs:
-        relevant.update(attr_to_indices[attr])
-    
+    if args.relevance_mode == "any":
+        for attr in query_attrs:
+            relevant.update(attr_to_indices[attr])
+    else:
+        if query_attrs:
+            for idx, candidate_attrs in enumerate(attrs_by_idx):
+                if query_attrs.issubset(candidate_attrs):
+                    relevant.add(idx)
+
     # Добавляем временные соседи
-    current = query_token
-    for _ in range(args.temporal_window):
-        current = sample_to_next.get(current, "")
-        if not current:
-            break
-        if (current, query_cam) in sample_cam_to_idx:
-            relevant.add(sample_cam_to_idx[(current, query_cam)])
-    
+    if temporal_enabled:
+        current = query_token
+        for _ in range(args.temporal_window):
+            current = sample_to_next.get(current, "")
+            if not current:
+                break
+            if (current, query_cam) in sample_cam_to_idx:
+                relevant.add(sample_cam_to_idx[(current, query_cam)])
+
+    rel_sizes.append(len(relevant))
+
     # Находим ранг первого релевантного
     sorted_indices = torch.argsort(similarity[i], descending=True)
     found = False
@@ -333,15 +419,27 @@ r10 = np.mean(ranks <= 10)
 mrr = np.mean(1.0 / ranks)
 median_rank = np.median(ranks)
 
+# Среднее попарное косинусное сходство между текстовыми запросами
+sim_tt = text_embs @ text_embs.T
+mask = ~torch.eye(len(text_embs), dtype=torch.bool)
+avg_text_sim = sim_tt[mask].mean().item()
+
 print("\n" + "="*70)
 print("GME-VARCO-VISION-Embedding Validation Results")
 print("="*70)
-print(f"Text → Image Retrieval (with attribute + temporal relevance):")
+print(f"Query captions  : {args.camera_captions_path}")
+print(f"Relevance captions: {relevance_captions_path}")
+print(
+    "Text → Image Retrieval "
+    f"(attribute mode={args.relevance_mode}, temporal={'on' if temporal_enabled else 'off'}):"
+)
 print(f"  R@1:   {r1:.4f}")
 print(f"  R@5:   {r5:.4f}")
 print(f"  R@10:  {r10:.4f}")
 print(f"  MRR:   {mrr:.4f}")
 print(f"  Median Rank: {median_rank:.1f}")
+print(f"Relevant set size : mean={np.mean(rel_sizes):.1f}  std={np.std(rel_sizes):.1f}  min={np.min(rel_sizes)}  max={np.max(rel_sizes)}")
+print(f"Avg inter-query cosine similarity (text): {avg_text_sim:.4f}")
 print("="*70)
 
 # ========== 10. Сохранение результатов ==========
@@ -352,8 +450,15 @@ results = {
     'MRR': float(mrr),
     'Median_Rank': float(median_rank),
     'total_pairs': len(text_embs),
-    'temporal_window': args.temporal_window,
-    'model_name': model_name
+    'temporal_window': args.temporal_window if temporal_enabled else 0,
+    'temporal_relevance_enabled': temporal_enabled,
+    'relevance_mode': args.relevance_mode,
+    'model_name': args.model_name,
+    'query_captions': args.camera_captions_path,
+    'relevance_captions': relevance_captions_path,
+    'avg_relevant_set_size': float(np.mean(rel_sizes)),
+    'std_relevant_set_size': float(np.std(rel_sizes)),
+    'avg_inter_query_cosine_sim': float(avg_text_sim),
 }
 
 with open(f"{args.output_logs}/results.json", 'w') as f:

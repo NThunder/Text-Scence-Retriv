@@ -26,6 +26,8 @@ def parse_args():
     parser.add_argument("--output_path", type=str, default="./camera_point_embeddings_fixed.pth")
     parser.add_argument("--max_points", type=int, default=20000)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--max_val_samples", type=int, default=-1, help="Max validation samples (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1, help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
@@ -129,12 +131,18 @@ val_scenes = set(create_splits_scenes()["val"])
 val_sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in val_scenes:
+        scene_tokens = []
         current = scene["first_sample_token"]
-        while current != "" and len(val_sample_tokens) < 150:
-            val_sample_tokens.append(current)
+        while current != "":
+            scene_tokens.append(current)
             current = nusc.get("sample", current)["next"]
-        if len(val_sample_tokens) >= 150:
-            break
+        if args.val_samples_per_scene > 0:
+            step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+            scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+        val_sample_tokens.extend(scene_tokens)
+
+if args.max_val_samples > 0:
+    val_sample_tokens = val_sample_tokens[:args.max_val_samples]
 
 CAMERAS = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT",
            "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
