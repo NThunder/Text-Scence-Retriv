@@ -28,44 +28,40 @@ python retriv/encode_nuscenes_images_transformers.py \
 echo "========== LLM2CLIP zero-shot =========="
 python retriv/encode_camera_aware_captions_llm2clip.py \
   --camera_captions_path $L0 \
-  --output_path $OUTDIR/text_llm2clip_L0.pth $VAL
+  --output_path $OUTDIR/text_llm2clip_L0.pth $VAL --max_samples -1
 
 python retriv/encode_camera_aware_captions_llm2clip.py \
   --camera_captions_path $L3 \
-  --output_path $OUTDIR/text_llm2clip_L3.pth $VAL
+  --output_path $OUTDIR/text_llm2clip_L3.pth $VAL --max_samples -1
 
 python retriv/encode_nuscenes_images_evaclip_l14_336_hf.py \
   --output_path $OUTDIR/img_llm2clip.pth $VAL
 
+EVALFLAGS="--disable_temporal_relevance --relevance_mode all $VAL"
+
 echo "========== EVAL =========="
 python retriv/eval_clip_baseline_per_camera.py \
   --attributes_path $L0 --text_emb_path $OUTDIR/text_clipB32_L0.pth \
-  --image_emb_path $OUTDIR/img_clipB32.pth \
-  --disable_temporal_relevance --relevance_mode all
+  --image_emb_path $OUTDIR/img_clipB32.pth $EVALFLAGS
 
 python retriv/eval_clip_baseline_per_camera.py \
   --attributes_path $L0 --text_emb_path $OUTDIR/text_clipB32_L3.pth \
-  --image_emb_path $OUTDIR/img_clipB32.pth \
-  --disable_temporal_relevance --relevance_mode all
+  --image_emb_path $OUTDIR/img_clipB32.pth $EVALFLAGS
 
 python retriv/eval_clip_baseline_per_camera.py \
   --attributes_path $L3 --text_emb_path $OUTDIR/text_clipB32_L3.pth \
-  --image_emb_path $OUTDIR/img_clipB32.pth \
-  --disable_temporal_relevance --relevance_mode all
+  --image_emb_path $OUTDIR/img_clipB32.pth $EVALFLAGS
 
 python retriv/eval_clip_baseline_per_camera.py \
   --attributes_path $L0 --text_emb_path $OUTDIR/text_llm2clip_L0.pth \
-  --image_emb_path $OUTDIR/img_llm2clip.pth \
-  --disable_temporal_relevance --relevance_mode all
+  --image_emb_path $OUTDIR/img_llm2clip.pth $EVALFLAGS
 
 python retriv/eval_clip_baseline_per_camera.py \
   --attributes_path $L0 --text_emb_path $OUTDIR/text_llm2clip_L3.pth \
-  --image_emb_path $OUTDIR/img_llm2clip.pth \
-  --disable_temporal_relevance --relevance_mode all
+  --image_emb_path $OUTDIR/img_llm2clip.pth $EVALFLAGS
 
 python retriv/eval_clip_baseline_per_camera.py \
   --attributes_path $L3 --text_emb_path $OUTDIR/text_llm2clip_L3.pth \
-  --image_emb_path $OUTDIR/img_llm2clip.pth \
-  --disable_temporal_relevance --relevance_mode all
+  --image_emb_path $OUTDIR/img_llm2clip.pth $EVALFLAGS
 
 echo "Done! Results in $OUTDIR/"
