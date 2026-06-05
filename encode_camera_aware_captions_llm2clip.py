@@ -22,6 +22,8 @@ def parse_args():
     parser.add_argument("--lora_path", type=str, default=None, help="Path to LoRA adapter")
     parser.add_argument("--split", type=str, default="val", choices=["train", "val"], help="nuScenes split to encode")
     parser.add_argument("--max_samples", type=int, default=150, help="Maximum number of samples to encode")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1,
+        help="Number of evenly spaced samples per validation scene (-1 = all)")
     return parser.parse_args()
 
 args = parse_args()
@@ -64,13 +66,20 @@ split_scenes = set(create_splits_scenes()[args.split])
 sample_tokens = []
 for scene in nusc.scene:
     if scene["name"] in split_scenes:
+        scene_tokens = []
         current_sample_token = scene["first_sample_token"]
-        while current_sample_token != "" and len(sample_tokens) < args.max_samples:
-            sample_tokens.append(current_sample_token)
+        while current_sample_token != "":
+            scene_tokens.append(current_sample_token)
             current_sample_token = nusc.get("sample", current_sample_token)["next"]
-        if len(sample_tokens) >= args.max_samples:
-            break
-sample_tokens = sample_tokens[:args.max_samples]
+
+        if args.split == "val" and args.val_samples_per_scene > 0:
+            step = max(1, len(scene_tokens) // args.val_samples_per_scene)
+            scene_tokens = scene_tokens[::step][:args.val_samples_per_scene]
+
+        sample_tokens.extend(scene_tokens)
+
+if args.max_samples > 0 and len(sample_tokens) > args.max_samples:
+    sample_tokens = sample_tokens[:args.max_samples]
 print(f"Selected {len(sample_tokens)} {args.split} samples.")
 
 # === Генерация текстовых эмбеддингов ===
