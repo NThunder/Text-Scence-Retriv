@@ -48,6 +48,10 @@ def parse_args():
         help="Number of evenly spaced samples per validation scene (-1 = all)")
     parser.add_argument("--filter_pairs", type=str, default=None,
         help="Path to JSON with list of (sample_token, cam) pairs to use for evaluation")
+    parser.add_argument("--save_image_embs", type=str, default=None,
+        help="Path to save image embeddings for reuse")
+    parser.add_argument("--load_image_embs", type=str, default=None,
+        help="Path to load precomputed image embeddings (skips image encoding)")
     return parser.parse_args()
 
 args = parse_args()
@@ -286,19 +290,33 @@ for i in tqdm(range(0, len(all_texts), args.batch_size)):
         text_embeddings[sample_token][cam] = embeddings[j]
 
 # Batch обработка изображений
-print("Encoding images...")
-for i in tqdm(range(0, len(all_image_paths), args.batch_size)):
-    batch_paths = all_image_paths[i:i+args.batch_size]
-    batch_info = all_image_info[i:i+args.batch_size]
-    
-    embeddings = get_image_embeddings(batch_paths)
-    
-    for j, (sample_token, cam) in enumerate(batch_info):
-        if sample_token not in image_embeddings:
-            image_embeddings[sample_token] = {}
-        image_embeddings[sample_token][cam] = embeddings[j]
+if args.load_image_embs:
+    print(f"Loading image embeddings from {args.load_image_embs}...")
+    loaded = torch.load(args.load_image_embs, map_location="cpu")
+    image_embeddings = {}
+    for sample_token, cam in all_image_info:
+        if sample_token in loaded and cam in loaded[sample_token]:
+            if sample_token not in image_embeddings:
+                image_embeddings[sample_token] = {}
+            image_embeddings[sample_token][cam] = loaded[sample_token][cam]
+else:
+    print("Encoding images...")
+    for i in tqdm(range(0, len(all_image_paths), args.batch_size)):
+        batch_paths = all_image_paths[i:i+args.batch_size]
+        batch_info = all_image_info[i:i+args.batch_size]
 
-# Сохраняем эмбеддинги
+        embeddings = get_image_embeddings(batch_paths)
+
+        for j, (sample_token, cam) in enumerate(batch_info):
+            if sample_token not in image_embeddings:
+                image_embeddings[sample_token] = {}
+            image_embeddings[sample_token][cam] = embeddings[j]
+
+    if args.save_image_embs:
+        print(f"Saving image embeddings to {args.save_image_embs}...")
+        torch.save(image_embeddings, args.save_image_embs)
+
+# Сохраняем эмбеддинги для этого запуска
 torch.save(text_embeddings, f"{args.output_logs}/embeddings/text_embeddings.pth")
 torch.save(image_embeddings, f"{args.output_logs}/embeddings/image_embeddings.pth")
 print(f"✓ Embeddings saved to {args.output_logs}/embeddings/")
