@@ -62,7 +62,10 @@ def parse_args():
         help="Max training samples (-1 = all)")
     parser.add_argument("--max_val_samples", type=int, default=-1,
         help="Max validation samples (-1 = all)")
-    parser.add_argument("--val_samples_per_scene", type=int, default=-1, help="Number of evenly spaced samples per validation scene (-1 = all)")
+    parser.add_argument("--val_samples_per_scene", type=int, default=-1,
+        help="Number of evenly spaced samples per validation scene (-1 = all)")
+    parser.add_argument("--validate_only", type=str, default=None,
+        help="Path to checkpoint directory (models/best/) for validation-only mode")
     return parser.parse_args()
 
 args = parse_args()
@@ -709,7 +712,38 @@ if args.resume:
     point_model.load_state_dict(checkpoint['point_model_state_dict']) if 'point_model_state_dict' in checkpoint else None
     point_proj.load_state_dict(checkpoint['point_proj_state_dict']) if 'point_proj_state_dict' in checkpoint else None
 
-# ========== 14. Цикл обучения ==========
+# ========== 14. Валидация без обучения (validate_only) ==========
+if args.validate_only:
+    print(f"\n=== Validate-only mode, loading weights from {args.validate_only} ===")
+    vd = args.validate_only
+    
+    # Загружаем веса
+    from safetensors.torch import load_file as safe_load
+    vision_model.load_state_dict(safe_load(f"{vd}/vision_lora/adapter_model.safetensors"), strict=False)
+    text_model.load_state_dict(safe_load(f"{vd}/text_lora/adapter_model.safetensors"), strict=False)
+    point_model.load_state_dict(torch.load(f"{vd}/point_model.pth", map_location='cuda'))
+    point_proj.load_state_dict(torch.load(f"{vd}/point_proj.pth", map_location='cuda'))
+    fusion_model.load_state_dict(torch.load(f"{vd}/fusion_model.pth", map_location='cuda'))
+    
+    # Prepare val dataset with new samples
+    val_dataset, num_val_pairs = prepare_val_dataset(
+        nusc, camera_captions, processor, 
+        num_samples=args.max_val_samples, 
+        val_samples_per_scene=args.val_samples_per_scene
+    )
+    print(f"Prepared validation dataset with {num_val_pairs} pairs")
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                            num_workers=2, pin_memory=True, collate_fn=collate_fn)
+    
+    # Run validation
+    r1, r5, r10, mrr, val_loss = validate(
+        vision_model, text_model, point_model, clip_model, point_proj, fusion_model,
+        val_loader, utonia_transform, sample_to_next, epoch=0, save_embeddings=True
+    )
+    print(f"\n✅ Validate-only completed. R@1={r1:.4f}, R@5={r5:.4f}, R@10={r10:.4f}, MRR={mrr:.4f}")
+    exit()
+
+# ========== 15. Цикл обучения ==========
 print(f"\n=== Starting training for {args.epochs} epochs ===")
 
 for epoch in range(start_epoch, args.epochs):
