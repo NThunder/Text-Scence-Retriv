@@ -235,73 +235,73 @@ print(f"Median Rank: {median_rank:.1f}")
 print(f"Relevant set size : mean={np.mean(rel_sizes):.1f}  std={np.std(rel_sizes):.1f}  min={np.min(rel_sizes)}  max={np.max(rel_sizes)}")
 print(f"Avg inter-query cosine similarity (text): {avg_text_sim:.4f}")
 
-import matplotlib.pyplot as plt
-from PIL import Image
-import os
+# import matplotlib.pyplot as plt
+# from PIL import Image
+# import os
 
-os.makedirs(vis_dir, exist_ok=True)
+# os.makedirs(vis_dir, exist_ok=True)
 
-def load_image(sample_token, cam_name):
-    cam_token = nusc.get("sample", sample_token)["data"][cam_name]
-    cam_data = nusc.get("sample_data", cam_token)
-    img_path = os.path.join(NUSCENES_DATAROOT, cam_data["filename"])
-    return Image.open(img_path).convert("RGB")
+# def load_image(sample_token, cam_name):
+#     cam_token = nusc.get("sample", sample_token)["data"][cam_name]
+#     cam_data = nusc.get("sample_data", cam_token)
+#     img_path = os.path.join(NUSCENES_DATAROOT, cam_data["filename"])
+#     return Image.open(img_path).convert("RGB")
 
-def format_attrs(attrs_tuple):
-    return "\n".join(attrs_tuple) if attrs_tuple else "No attributes"
+# def format_attrs(attrs_tuple):
+#     return "\n".join(attrs_tuple) if attrs_tuple else "No attributes"
 
-num_vis = min(20, len(all_text_embs))
+# num_vis = min(20, len(all_text_embs))
 
-for i in range( len(all_text_embs)):
-    # Атрибуты запроса
-    query_attrs = all_attributes_list[i]
-    query_sample, query_cam = index_to_sample_cam[i]
-    query_img = load_image(query_sample, query_cam)
+# for i in range( len(all_text_embs)):
+#     # Атрибуты запроса
+#     query_attrs = all_attributes_list[i]
+#     query_sample, query_cam = index_to_sample_cam[i]
+#     query_img = load_image(query_sample, query_cam)
 
-    # Топ-1 retrieved
-    top1_idx = torch.argmax(similarity[i]).item()
-    retrieved_attrs = all_attributes_list[top1_idx]
-    retrieved_sample, retrieved_cam = index_to_sample_cam[top1_idx]
-    retrieved_img = load_image(retrieved_sample, retrieved_cam)
+#     # Топ-1 retrieved
+#     top1_idx = torch.argmax(similarity[i]).item()
+#     retrieved_attrs = all_attributes_list[top1_idx]
+#     retrieved_sample, retrieved_cam = index_to_sample_cam[top1_idx]
+#     retrieved_img = load_image(retrieved_sample, retrieved_cam)
 
-    # Проверка релевантности
-    is_relevant = top1_idx in query_relevant_indices[i]
-    match_status = "✅ MATCH" if is_relevant else "❌ MISMATCH"
+#     # Проверка релевантности
+#     is_relevant = top1_idx in query_relevant_indices[i]
+#     match_status = "✅ MATCH" if is_relevant else "❌ MISMATCH"
 
-    # Визуализация
-    fig, axes = plt.subplots(1, 2, figsize=(14, 8))
+#     # Визуализация
+#     fig, axes = plt.subplots(1, 2, figsize=(14, 8))
 
-    # Query side
-    axes[0].imshow(query_img)
-    axes[0].set_title("Query Image", fontsize=12, pad=120)
-    axes[0].text(
-        0.5, 1.02, format_attrs(query_attrs),
-        transform=axes[0].transAxes,
-        fontsize=9,
-        ha="center",
-        va="bottom",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", edgecolor="orange")
-    )
-    axes[0].axis('off')
+#     # Query side
+#     axes[0].imshow(query_img)
+#     axes[0].set_title("Query Image", fontsize=12, pad=120)
+#     axes[0].text(
+#         0.5, 1.02, format_attrs(query_attrs),
+#         transform=axes[0].transAxes,
+#         fontsize=9,
+#         ha="center",
+#         va="bottom",
+#         bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", edgecolor="orange")
+#     )
+#     axes[0].axis('off')
 
-    # Retrieved side
-    axes[1].imshow(retrieved_img)
-    axes[1].set_title(f"Retrieved (Top-1)\n{match_status}", fontsize=12, pad=120, color='green' if is_relevant else 'red')
-    axes[1].text(
-        0.5, 1.02, format_attrs(retrieved_attrs),
-        transform=axes[1].transAxes,
-        fontsize=9,
-        ha="center",
-        va="bottom",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcyan" if is_relevant else "lightcoral", edgecolor="gray")
-    )
-    axes[1].axis('off')
+#     # Retrieved side
+#     axes[1].imshow(retrieved_img)
+#     axes[1].set_title(f"Retrieved (Top-1)\n{match_status}", fontsize=12, pad=120, color='green' if is_relevant else 'red')
+#     axes[1].text(
+#         0.5, 1.02, format_attrs(retrieved_attrs),
+#         transform=axes[1].transAxes,
+#         fontsize=9,
+#         ha="center",
+#         va="bottom",
+#         bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcyan" if is_relevant else "lightcoral", edgecolor="gray")
+#     )
+#     axes[1].axis('off')
 
-    plt.suptitle("Attribute-Based Retrieval Example", fontsize=13, y=0.98)
-    plt.tight_layout()
+#     plt.suptitle("Attribute-Based Retrieval Example", fontsize=13, y=0.98)
+#     plt.tight_layout()
 
-    save_path = os.path.join(vis_dir, f"example_{i:03d}.png")
-    # plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
+#     save_path = os.path.join(vis_dir, f"example_{i:03d}.png")
+#     # plt.savefig(save_path, dpi=150, bbox_inches='tight')
+#     plt.close()
 
-print(f"Saved {num_vis} annotated examples to {vis_dir}")
+# print(f"Saved {num_vis} annotated examples to {vis_dir}")
