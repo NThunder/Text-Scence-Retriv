@@ -7,6 +7,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "EVA_CLIP_rei"))
 import argparse
 import torch
 from PIL import Image
+import sys
+sys.path.insert(0, "/home/jovyan/shares/SR006.nfs2/bukhtuev/M3Net/EVA/EVA-CLIP/rei")
 from eva_clip import create_model_and_transforms
 from nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
