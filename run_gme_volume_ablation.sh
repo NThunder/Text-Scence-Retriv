@@ -11,8 +11,8 @@ L0="./retriv/camera_aware_captions_L0_p5.json"
 
 IMG_CACHE="$OUTDIR/img_cache"
 mkdir -p "$IMG_CACHE"
-VAL="--val_samples_per_scene 4"
-EVAL="--val_samples_per_scene 4 --disable_temporal_relevance --relevance_mode all"
+VAL="--val_samples_per_scene 4 --batch_size 2"
+EVAL="--val_samples_per_scene 4 --batch_size 2 --disable_temporal_relevance --relevance_mode all"
 
 echo "========== GME FT. 1k =========="
 $GPU python retriv/finetune_gme_nuscenes.py \
