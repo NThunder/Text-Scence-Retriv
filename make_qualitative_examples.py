@@ -78,11 +78,18 @@ def parse_args():
     p.add_argument("--save_image_embs", type=str, default=None)
     p.add_argument("--val_samples_per_scene", type=int, default=-1)
     p.add_argument("--batch_size", type=int, default=8)
-    p.add_argument("--n_success", type=int, default=2)
-    p.add_argument("--n_fail", type=int, default=1)
+    p.add_argument("--n_success", type=int, default=6,
+                   help="How many success candidates to save for browsing")
+    p.add_argument("--n_fail", type=int, default=6,
+                   help="How many failure candidates to save for browsing")
     p.add_argument("--max_attrs", type=int, default=3,
                    help="Only use queries with at most this many L0 attributes "
                         "(keeps the overlaid caption short)")
+    p.add_argument("--min_self_sim", type=float, default=0.0,
+                   help="Min cosine(query text, its OWN image): higher = the "
+                        "caption clearly matches the query frame (good GT)")
+    p.add_argument("--exclude_tokens", type=str, nargs="*", default=[],
+                   help="Query sample_tokens to skip (e.g. to re-roll past bad examples)")
     p.add_argument("--rank_cap", type=int, default=50,
                    help="Cap when searching the rank of the first relevant frame")
     p.add_argument("--out_dir", type=str, default="./qual_frames")
@@ -208,23 +215,36 @@ def main():
                 return k + 1
         return args.rank_cap + 1  # ">cap"
 
+    row_of = {gi: r for r, gi in enumerate(valid)}   # gallery index -> sims row
+    exclude = set(args.exclude_tokens)
+
     successes, failures = [], []
     for row, i in enumerate(tqdm(valid, desc="Scoring")):
         t, c = gallery[i]
+        if t in exclude:
+            continue
         qattrs = attrs_by_idx[i]
         if not (1 <= len(qattrs) <= args.max_attrs):
+            continue
+        # how well the caption matches its OWN image (GT text <-> GT image)
+        q_self = float(sims[row, i])
+        if q_self < args.min_self_sim:
             continue
         order = torch.argsort(sims[row], descending=True).tolist()
         top1 = order[0]
         rtok, rcam = gallery[top1]
         is_rel = bool(qattrs) and qattrs.issubset(attrs_by_idx[top1])
+        # alignment of the retrieved frame with its own caption
+        ret_self = float(sims[row_of[top1], top1]) if top1 in row_of else 0.0
         rec = {
             "level": args.level,
             "query_token": t, "query_camera": c,
             "query_text": qtext(t, c),
             "query_L0_attributes": sorted(qattrs),
+            "query_self_sim": round(q_self, 4),
             "retrieved_token": rtok, "retrieved_camera": rcam,
             "retrieved_L0_attributes": sorted(attrs_by_idx[top1]),
+            "retrieved_self_sim": round(ret_self, 4),
             "relevant": is_rel,
         }
         if is_rel:
@@ -237,38 +257,46 @@ def main():
                 rec["first_relevant_rank"] = first_rel_rank(order, relset)
                 failures.append(rec)
 
-    # prefer fewer attributes (shorter overlaid caption); failures: clearer misses first
-    successes.sort(key=lambda r: len(r["query_L0_attributes"]))
-    failures.sort(key=lambda r: (len(r["query_L0_attributes"]), -r["first_relevant_rank"]))
+    # Prefer examples whose captions clearly match their frames (high self-sim),
+    # so the GT text agrees with the GT image. Successes: both sides must align;
+    # failures: at least the query side must align (so the miss is real, not a
+    # mislabeled query).
+    successes.sort(key=lambda r: -(r["query_self_sim"] + r["retrieved_self_sim"]))
+    failures.sort(key=lambda r: -r["query_self_sim"])
     chosen = ([("succ", r) for r in successes[:args.n_success]]
               + [("fail", r) for r in failures[:args.n_fail]])
     if len(successes) < args.n_success or len(failures) < args.n_fail:
         print(f"WARNING: found {len(successes)} successes, {len(failures)} failures "
               f"(requested {args.n_success}/{args.n_fail}). Relax --max_attrs if too few.")
 
-    # ---- save frames + meta ----
+    # ---- save a pool of candidates + meta (browse, then pick) ----
     meta = []
     counters = defaultdict(int)
     for kind, r in chosen:
         counters[kind] += 1
         k = counters[kind]
+        cid = f"{kind}{k:02d}"
         Image.open(img_path(r["query_token"], r["query_camera"])).convert("RGB") \
-            .save(os.path.join(args.out_dir, f"{kind}{k}_query.png"))
+            .save(os.path.join(args.out_dir, f"{cid}_query.png"))
         Image.open(img_path(r["retrieved_token"], r["retrieved_camera"])).convert("RGB") \
-            .save(os.path.join(args.out_dir, f"{kind}{k}_ret.png"))
+            .save(os.path.join(args.out_dir, f"{cid}_ret.png"))
         r = dict(r)
+        r["id"] = cid
         r["kind"] = kind
-        r["query_file"] = f"{kind}{k}_query.png"
-        r["ret_file"] = f"{kind}{k}_ret.png"
+        r["query_file"] = f"{cid}_query.png"
+        r["ret_file"] = f"{cid}_ret.png"
         meta.append(r)
         flag = "OK" if r["relevant"] else "x"
-        print(f"  [{kind}{k}] {flag} q='{'; '.join(r['query_L0_attributes'])}'  "
+        print(f"  [{cid}] {flag} self(q={r['query_self_sim']}, ret={r['retrieved_self_sim']})  "
+              f"q='{'; '.join(r['query_L0_attributes'])}'  "
               f"-> ret='{'; '.join(r['retrieved_L0_attributes'])}'"
               + ("" if r["relevant"] else f"  (rank {r.get('first_relevant_rank')})"))
 
     with open(os.path.join(args.out_dir, "qual_meta.json"), "w") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-    print(f"\nDone. {len(meta)} examples + qual_meta.json in {args.out_dir}/")
+    print(f"\nDone. {len(meta)} candidates + qual_meta.json in {args.out_dir}/")
+    print("Browse them (or render a contact sheet with make_qualitative_contact.py),"
+          " then build the final figure from the chosen ids.")
 
 
 if __name__ == "__main__":
