@@ -66,6 +66,7 @@ def parse_args():
         help="Number of evenly spaced samples per validation scene (-1 = all)")
     parser.add_argument("--validate_only", type=str, default=None,
         help="Path to checkpoint directory (models/best/) for validation-only mode")
+    parser.add_argument("--no_prefix", action="store_true", help="Omit 'The camera view contains: ' prefix")
     return parser.parse_args()
 
 args = parse_args()
@@ -111,7 +112,10 @@ for sample_token in train_sample_tokens:
         continue
     for cam in CAMERAS:
         if cam in camera_captions[sample_token] and camera_captions[sample_token][cam]:
-            scene_text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
+            if args.no_prefix:
+                scene_text = " ".join(camera_captions[sample_token][cam])
+            else:
+                scene_text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
             train_pairs.append((sample_token, cam, scene_text))
 print(f"Total training pairs: {len(train_pairs)}")
 
@@ -367,7 +371,10 @@ def prepare_val_dataset(nusc, camera_captions, processor, num_samples=150, val_s
             continue
         for cam in CAMERAS:
             if cam in camera_captions[sample_token] and camera_captions[sample_token][cam]:
-                scene_text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
+                if args.no_prefix:
+                    scene_text = " ".join(camera_captions[sample_token][cam])
+                else:
+                    scene_text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
                 val_pairs.append((sample_token, cam, scene_text))
     return JointNuScenesDataset(nusc, val_pairs, processor), len(val_pairs)
 

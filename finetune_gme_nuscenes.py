@@ -44,6 +44,7 @@ def parse_args():
         help="Max validation pairs (-1 = all)")
     parser.add_argument("--val_samples_per_scene", type=int, default=-1,
         help="Number of evenly spaced samples per validation scene (-1 = all)")
+    parser.add_argument("--no_prefix", action="store_true", help="Omit 'The camera view contains: ' prefix")
     return parser.parse_args()
 
 args = parse_args()
@@ -87,7 +88,10 @@ for scene in nusc.scene:
         if current in camera_captions:
             for cam in CAMERAS:
                 if cam in camera_captions[current] and camera_captions[current][cam]:
-                    text = "The camera view contains: " + "; ".join(camera_captions[current][cam])
+                    if args.no_prefix:
+                        text = " ".join(camera_captions[current][cam])
+                    else:
+                        text = "The camera view contains: " + "; ".join(camera_captions[current][cam])
                     train_pairs.append((current, cam, text))
         current = nusc.get("sample", current)["next"] if current else None
 
@@ -118,7 +122,10 @@ for scene in nusc.scene:
         if sample_token in camera_captions:
             for cam in CAMERAS:
                 if cam in camera_captions[sample_token] and camera_captions[sample_token][cam]:
-                    text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
+                    if args.no_prefix:
+                        text = " ".join(camera_captions[sample_token][cam])
+                    else:
+                        text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
                     val_pairs.append((sample_token, cam, text))
 
 if args.max_val_pairs > 0:

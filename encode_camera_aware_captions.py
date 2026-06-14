@@ -16,6 +16,7 @@ def parse_args():
         help="Max validation samples (-1 = all)")
     parser.add_argument("--val_samples_per_scene", type=int, default=-1,
         help="Number of evenly spaced samples per validation scene (-1 = all)")
+    parser.add_argument("--no_prefix", action="store_true", help="Omit 'The camera view contains: ' prefix")
     return parser.parse_args()
 
 args = parse_args()
@@ -58,7 +59,10 @@ for sample_token in tqdm(val_sample_tokens, desc="Encoding text"):
     for cam_name, captions in cam_dict.items():
         if not captions:
             continue
-        scene_text = "The camera view contains: " + "; ".join(captions)
+        if args.no_prefix:
+            scene_text = " ".join(captions)
+        else:
+            scene_text = "The camera view contains: " + "; ".join(captions)
 
         inputs = tokenizer(scene_text, return_tensors="pt", padding=True, truncation=True, max_length=77).to("cuda")
         with torch.no_grad():

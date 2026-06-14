@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--max_samples", type=int, default=150, help="Maximum number of samples to encode")
     parser.add_argument("--val_samples_per_scene", type=int, default=-1,
         help="Number of evenly spaced samples per validation scene (-1 = all)")
+    parser.add_argument("--no_prefix", action="store_true", help="Omit 'The camera view contains: ' prefix")
     return parser.parse_args()
 
 args = parse_args()
@@ -93,7 +94,10 @@ for sample_token in tqdm(sample_tokens, desc="Encoding with LLM2CLIP"):
     for cam_name, captions in cam_dict.items():
         if not captions:
             continue
-        scene_text = "The camera view contains: " + "; ".join(captions)
+        if args.no_prefix:
+            scene_text = " ".join(captions)
+        else:
+            scene_text = "The camera view contains: " + "; ".join(captions)
         
         with torch.no_grad():
             # 1. Получаем 4096-dim от LLM2Vec
