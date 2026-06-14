@@ -42,6 +42,8 @@ def parse_args():
         choices=["any", "all"],
         help="Attribute relevance mode: any=at least one shared attribute, all=all query attributes must be present",
     )
+    parser.add_argument("--no_prefix", action="store_true",
+        help="Use comma-separated attributes without 'The camera view contains: ' prefix")
     parser.add_argument("--max_val_samples", type=int, default=-1,
         help="Max validation samples (-1 = all)")
     parser.add_argument("--val_samples_per_scene", type=int, default=-1,
@@ -243,7 +245,11 @@ for sample_token in tqdm(val_sample_tokens, desc="Preparing data"):
             continue
         
         # Текст
-        scene_text = "The camera view contains: " + "; ".join(camera_captions[sample_token][cam])
+        attrs = camera_captions[sample_token][cam]
+        if args.no_prefix:
+            scene_text = " ".join(attrs)
+        else:
+            scene_text = "The camera view contains: " + "; ".join(attrs)
         all_texts.append(scene_text)
         all_text_info.append((sample_token, cam))
         
@@ -443,7 +449,11 @@ if args.save_retrieval_results:
     examples = []
     for i in selected:
         query_token, query_cam = sample_cam_list[i]
-        query_text = "The camera view contains: " + "; ".join(camera_captions.get(query_token, {}).get(query_cam, []))
+        query_attrs_list = camera_captions.get(query_token, {}).get(query_cam, [])
+        if args.no_prefix:
+            query_text = " ".join(query_attrs_list)
+        else:
+            query_text = "The camera view contains: " + "; ".join(query_attrs_list)
         query_attrs = set(relevance_captions.get(query_token, {}).get(query_cam, []))
         relevant_set = set()
         if args.relevance_mode == "any":
