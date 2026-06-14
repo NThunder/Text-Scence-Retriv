@@ -52,6 +52,8 @@ def parse_args():
         help="Path to save image embeddings for reuse")
     parser.add_argument("--load_image_embs", type=str, default=None,
         help="Path to load precomputed image embeddings (skips image encoding)")
+    parser.add_argument("--save_retrieval_results", type=str, default=None,
+        help="Path to save attribute-based retrieval examples for teaser")
     return parser.parse_args()
 
 args = parse_args()
@@ -428,6 +430,51 @@ for i in tqdm(range(len(text_embs))):
             break
     if not found:
         ranks.append(len(text_embs))
+
+# ========== 8.5 Сохранение retrieval примеров для teaser ==========
+if args.save_retrieval_results:
+    print(f"Saving retrieval results to {args.save_retrieval_results}...")
+    import random
+    random.seed(42)
+    # Выбираем успешные (rank <= 1) и неудачные (rank >= 5) запросы
+    good = [i for i, r in enumerate(ranks) if r <= 1]
+    bad = [i for i, r in enumerate(ranks) if r >= 5]
+    selected = random.sample(good, min(5, len(good))) + random.sample(bad, min(5, len(bad)))
+    examples = []
+    for i in selected:
+        query_token, query_cam = sample_cam_list[i]
+        query_text = "The camera view contains: " + "; ".join(camera_captions.get(query_token, {}).get(query_cam, []))
+        query_attrs = set(relevance_captions.get(query_token, {}).get(query_cam, []))
+        relevant_set = set()
+        if args.relevance_mode == "any":
+            for attr in query_attrs:
+                relevant_set.update(attr_to_indices[attr])
+        else:
+            if query_attrs:
+                for j, cand_attrs in enumerate(attrs_by_idx):
+                    if query_attrs.issubset(cand_attrs):
+                        relevant_set.add(j)
+        sorted_idx = torch.argsort(similarity[i], descending=True)[:10].tolist()
+        retrieved = []
+        for pos, idx in enumerate(sorted_idx):
+            tok, cam = sample_cam_list[idx]
+            retrieved.append({
+                "rank": pos + 1,
+                "relevant": int(idx in relevant_set),
+                "sample_token": tok,
+                "camera": cam,
+            })
+        examples.append({
+            "query_rank": int(ranks[i]),
+            "query_token": query_token,
+            "query_camera": query_cam,
+            "query_text": query_text,
+            "query_attributes": list(query_attrs),
+            "top10": retrieved,
+        })
+    with open(args.save_retrieval_results, "w") as f:
+        json.dump(examples, f, indent=2, ensure_ascii=False)
+    print(f"✓ Saved {len(examples)} retrieval examples to {args.save_retrieval_results}")
 
 # ========== 9. Вывод метрик ==========
 ranks = np.array(ranks)
