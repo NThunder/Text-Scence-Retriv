@@ -4,14 +4,13 @@
 
 set -e
 
-GPU="CUDA_VISIBLE_DEVICES=2"
 BASE="./results_4perscene"
 VAL="--val_samples_per_scene 4 --batch_size 2"
 EVAL="--disable_temporal_relevance --relevance_mode all"
 L0="./retriv/camera_aware_captions_L0_p5.json"
 
 echo "========== WITH prefix (current default) =========="
-$GPU python retriv/validate_gme_vlm.py \
+python retriv/validate_gme_vlm.py \
   --model_name NCSOFT/GME-VARCO-VISION-Embedding \
   --camera_captions_path $L0 \
   --output_logs "$BASE/ablation_prefix" \
@@ -19,7 +18,7 @@ $GPU python retriv/validate_gme_vlm.py \
 
 echo ""
 echo "========== WITHOUT prefix (comma-separated) =========="
-$GPU python retriv/validate_gme_vlm.py \
+python retriv/validate_gme_vlm.py \
   --model_name NCSOFT/GME-VARCO-VISION-Embedding \
   --camera_captions_path $L0 \
   --output_logs "$BASE/ablation_noprefix" \

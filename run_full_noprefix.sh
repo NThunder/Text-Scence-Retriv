@@ -10,7 +10,6 @@ echo " Run in screen/tmux!"
 echo "==========================================="
 sleep 3
 
-GPU="CUDA_VISIBLE_DEVICES=2"
 OUTDIR="./results_noprefix"
 mkdir -p "$OUTDIR/img_cache"
 L0="./retriv/camera_aware_captions_L0_p5.json"
@@ -41,7 +40,7 @@ for MODEL_TAG in zs ftL0 ftL3; do
       echo "========== GME $MODEL_TAG $LEVEL→$RELEV =========="
       
       if $FIRST_RUN; then
-        $GPU python retriv/validate_gme_vlm.py \
+        python retriv/validate_gme_vlm.py \
           --model_name $MODEL_NAME \
           --camera_captions_path "./retriv/camera_aware_captions_${LEVEL}_p5.json" \
           $RELEV_ARG \
@@ -49,7 +48,7 @@ for MODEL_TAG in zs ftL0 ftL3; do
           --save_image_embs "$IMG_CACHE"
         FIRST_RUN=false
       else
-        $GPU python retriv/validate_gme_vlm.py \
+        python retriv/validate_gme_vlm.py \
           --model_name $MODEL_NAME \
           --camera_captions_path "./retriv/camera_aware_captions_${LEVEL}_p5.json" \
           $RELEV_ARG \

@@ -4,7 +4,6 @@
 
 set -e
 
-GPU="CUDA_VISIBLE_DEVICES=2"
 OUTDIR="./results_4perscene"
 mkdir -p $OUTDIR
 
@@ -18,7 +17,7 @@ echo "========================================="
 
 for LEVEL in L0 L3; do
   CAPS=./retriv/camera_aware_captions_${LEVEL}_p5.json
-  $GPU python retriv/validate_gme_vlm.py \
+  python retriv/validate_gme_vlm.py \
     --model_name NCSOFT/GME-VARCO-VISION-Embedding \
     --camera_captions_path $CAPS \
     --output_logs $OUTDIR/gme_zs_${LEVEL} \
@@ -31,7 +30,7 @@ echo "========================================="
 
 for LEVEL in L0 L3; do
   CAPS=./retriv/camera_aware_captions_${LEVEL}_p5.json
-  $GPU python retriv/validate_gme_vlm.py \
+  python retriv/validate_gme_vlm.py \
     --model_name ./gme_finetuned_L0_p5_v2/best_model \
     --camera_captions_path $CAPS \
     --output_logs $OUTDIR/gme_ftL0_${LEVEL} \
@@ -44,7 +43,7 @@ echo "========================================="
 
 for LEVEL in L0 L3; do
   CAPS=./retriv/camera_aware_captions_${LEVEL}_p5.json
-  $GPU python retriv/validate_gme_vlm.py \
+  python retriv/validate_gme_vlm.py \
     --model_name ./gme_finetuned_L3_p5_v2/best_model \
     --camera_captions_path $CAPS \
     --output_logs $OUTDIR/gme_ftL3_${LEVEL} \

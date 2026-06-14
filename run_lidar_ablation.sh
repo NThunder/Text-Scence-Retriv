@@ -5,7 +5,6 @@
 
 set -e
 
-GPU="CUDA_VISIBLE_DEVICES=2"
 
 # ========== Шаг 1: Генерация caption-файлов для разных порогов ==========
 for P in 0 1 20; do
@@ -38,7 +37,7 @@ for P in 0 1 5 20; do
     echo "  Filter:      $FILTER_PAIRS"
     echo "  Output:      $OUTDIR"
     echo "============================================"
-    $GPU python validate_gme_vlm.py \
+    python validate_gme_vlm.py \
         --model_name NCSOFT/GME-VARCO-VISION-Embedding \
         --camera_captions_path $CAPS \
         --output_logs $OUTDIR \

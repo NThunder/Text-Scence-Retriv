@@ -4,14 +4,13 @@
 
 set -e
 
-GPU="CUDA_VISIBLE_DEVICES=2"
 OUTDIR="./results_4perscene"
 VAL="--val_samples_per_scene 4 --batch_size 2"
 EVAL="--disable_temporal_relevance --relevance_mode all --val_samples_per_scene 4 --batch_size 2"
 
 for P in 0 1 5 20; do
   echo "========== Threshold p=$P =========="
-  $GPU python retriv/validate_gme_vlm.py \
+  python retriv/validate_gme_vlm.py \
     --model_name NCSOFT/GME-VARCO-VISION-Embedding \
     --camera_captions_path "./retriv/camera_aware_captions_L0_p${P}.json" \
     --output_logs "$OUTDIR/lidar_ablation_p${P}" \

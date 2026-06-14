@@ -4,7 +4,6 @@
 
 set -e
 
-GPU="CUDA_VISIBLE_DEVICES=2"
 OUTDIR="./results_noprefix"
 mkdir -p "$OUTDIR"
 VAL="--val_samples_per_scene 4 --batch_size 2"
@@ -13,7 +12,7 @@ NOPREFIX="--no_prefix"
 
 for P in 0 1 5 20; do
   echo "========== p=$P =========="
-  $GPU python retriv/validate_gme_vlm.py \
+  python retriv/validate_gme_vlm.py \
     --model_name NCSOFT/GME-VARCO-VISION-Embedding \
     --camera_captions_path "./retriv/camera_aware_captions_L0_p${P}.json" \
     --output_logs "$OUTDIR/lidar_p${P}" $VAL $EVAL $NOPREFIX

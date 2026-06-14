@@ -4,7 +4,6 @@
 
 set -e
 
-GPU="CUDA_VISIBLE_DEVICES=2"
 OUTDIR="./results_noprefix"
 mkdir -p "$OUTDIR/img_cache"
 L0="./retriv/camera_aware_captions_L0_p5.json"
@@ -33,13 +32,13 @@ for MODEL_TAG in zs ftL0 ftL3; do
       CAPS="--camera_captions_path ./retriv/camera_aware_captions_${LEVEL}_p5.json"
 
       if $FIRST; then
-        $GPU python retriv/validate_gme_vlm.py \
+        python retriv/validate_gme_vlm.py \
           --model_name $MODEL_NAME $CAPS $RELEV_ARG \
           --output_logs "$OUTDIR/$TAG" $VAL $EVAL $NOPREFIX \
           --save_image_embs "$IMG_CACHE"
         FIRST=false
       else
-        $GPU python retriv/validate_gme_vlm.py \
+        python retriv/validate_gme_vlm.py \
           --model_name $MODEL_NAME $CAPS $RELEV_ARG \
           --output_logs "$OUTDIR/$TAG" $VAL $EVAL $NOPREFIX \
           --load_image_embs "$IMG_CACHE"
