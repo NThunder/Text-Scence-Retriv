@@ -1,6 +1,6 @@
 # tools/encode_nuscenes_images_llm2clip_openai_l14_336_hf.py
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 import torch
 from PIL import Image
@@ -36,7 +36,7 @@ if not lora_path:
     model_name = "microsoft/LLM2CLIP-Openai-L-14-336"
 model = AutoModel.from_pretrained(
     model_name,
-    torch_dtype=torch.float16,
+    torch_dtype=torch.float32,
     trust_remote_code=True
 ).cuda().eval()
 
@@ -80,12 +80,14 @@ for sample_token in tqdm(val_sample_tokens, desc="Encoding images with LLM2CLIP"
         try:
             image = Image.open(img_path).convert("RGB")
             inputs = processor(images=image, return_tensors="pt").pixel_values.to("cuda")
-            with torch.no_grad(), torch.cuda.amp.autocast():
+            with torch.no_grad():
                 image_features = model.get_image_features(inputs)
                 image_features = torch.nn.functional.normalize(image_features, p=2, dim=-1)
             cam_data[cam_name] = image_features.cpu().squeeze(0)
+            print("cam_data[cam_name]:  ", cam_data[cam_name].shape)
         except Exception as e:
             print(f"Error processing {img_path}: {e}")
+            print("Exception:  ", "Exception")
             cam_data[cam_name] = torch.zeros(768)
     camera_image_embs[sample_token] = cam_data
 
