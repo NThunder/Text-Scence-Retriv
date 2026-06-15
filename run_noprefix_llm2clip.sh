@@ -22,17 +22,17 @@ python retriv/encode_camera_aware_captions_llm2clip.py \
 python retriv/encode_nuscenes_images_evaclip_l14_336_hf.py \
   --output_path "$OUTDIR/img_llm2clip.pth" $VAL
 
-echo "========== Full LoRA (10k pairs) =========="
+echo "========== Full LoRA (retrained with --no_prefix) =========="
 python retriv/encode_camera_aware_captions_llm2clip.py \
-  --lora_path ./lora_text_L0_p5_10k_best \
+  --lora_path ./lora_text_noprefix_best \
   --camera_captions_path $L0 --output_path "$OUTDIR/text_fullora_L0.pth" \
   $VAL --max_samples -1 $NOPREFIX
 python retriv/encode_camera_aware_captions_llm2clip.py \
-  --lora_path ./lora_text_L0_p5_10k_best \
+  --lora_path ./lora_text_noprefix_best \
   --camera_captions_path $L3 --output_path "$OUTDIR/text_fullora_L3.pth" \
   $VAL --max_samples -1 $NOPREFIX
 python retriv/encode_nuscenes_images_evaclip_l14_336_hf.py \
-  --lora_path ./lora_image_L0_p5_10k_best \
+  --lora_path ./lora_image_noprefix_best \
   --output_path "$OUTDIR/img_fullora.pth" $VAL
 
 echo "========== EVAL =========="

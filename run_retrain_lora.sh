@@ -1,7 +1,6 @@
 #!/bin/bash
 # Retrain Full LoRA + Image LoRA with --no_prefix
 # Run in: llm2clip env
-# ~12 hours
 
 set -e
 
@@ -15,14 +14,16 @@ python retriv/train_joint_lora_encoders.py \
   --max_train_samples 2200 --no_prefix
 
 echo "===== Image LoRA --no_prefix ====="
-# For Image LoRA, need to encode L0 text without prefix first
+# Step 1: encode L0 train text with --no_prefix
 python retriv/encode_camera_aware_captions_llm2clip.py \
   --camera_captions_path $L0 \
-  --output_path ./text_embs_llm2clip_L0_noprefix.pth \
-  --val_samples_per_scene 4 --max_samples -1 --no_prefix
+  --output_path ./text_embs_llm2clip_train_noprefix.pth \
+  --split train --max_samples 2200 --no_prefix
 
+# Step 2: train image encoder using precomputed text embeddings
 python retriv/train_lora_image_encoder.py \
-  --text_emb_path ./text_embs_llm2clip_L0_noprefix.pth \
-  --output_lora_dir ./lora_image_only_noprefix
+  --text_emb_path ./text_embs_llm2clip_train_noprefix.pth \
+  --output_lora_dir ./lora_image_only_noprefix \
+  --max_train_samples 2200
 
 echo "Session 2 done! Full LoRA + Image LoRA with --no_prefix"

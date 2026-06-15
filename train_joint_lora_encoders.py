@@ -273,26 +273,27 @@ def validate(vision_model, text_model, clip_model, val_dataset, batch_size=16):
     i2t_r1 = (sim_matrix.argmax(dim=1) == torch.arange(len(sim_matrix))).float().mean().item()
     t2i_r1 = (sim_matrix.argmax(dim=0) == torch.arange(len(sim_matrix))).float().mean().item()
     
-    # Метрики с учётом атрибутов (any mode, без temporal)
+    # Метрики с учётом атрибутов (all mode, без temporal)
     attr_r1, attr_r5, attr_r10, attr_mrr = 0.0, 0.0, 0.0, 0.0
     if all_sample_tokens:
-        local_index = {}
-        for idx, (token, cam) in enumerate(zip(all_sample_tokens, all_cameras)):
-            local_index[(token, cam)] = idx
-        
+        attrs_by_idx = []
         attr_to_indices = defaultdict(set)
         for idx, (token, cam) in enumerate(zip(all_sample_tokens, all_cameras)):
-            if token in camera_captions and cam in camera_captions[token]:
-                for attr in camera_captions[token][cam]:
-                    attr_to_indices[attr].add(idx)
-        
+            attrs = set(camera_captions.get(token, {}).get(cam, []))
+            attrs_by_idx.append(attrs)
+            for attr in attrs:
+                attr_to_indices[attr].add(idx)
+
         ranks = []
         for i in range(len(all_sample_tokens)):
             sample_token, cam = all_sample_tokens[i], all_cameras[i]
+            query_attrs = set(camera_captions.get(sample_token, {}).get(cam, []))
             relevant = set()
-            if sample_token in camera_captions and cam in camera_captions[sample_token]:
-                for attr in camera_captions[sample_token][cam]:
-                    relevant.update(attr_to_indices[attr])
+            if query_attrs:
+                for idx, candidate_attrs in enumerate(attrs_by_idx):
+                    if query_attrs.issubset(candidate_attrs):
+                        relevant.add(idx)
+
             sorted_indices = torch.argsort(sim_matrix[i], descending=True)
             found = False
             for rank_pos, idx in enumerate(sorted_indices.tolist()):
@@ -302,7 +303,7 @@ def validate(vision_model, text_model, clip_model, val_dataset, batch_size=16):
                     break
             if not found:
                 ranks.append(len(all_sample_tokens))
-        
+
         ranks = np.array(ranks)
         attr_r1 = np.mean(ranks <= 1)
         attr_r5 = np.mean(ranks <= 5)
@@ -410,7 +411,7 @@ for epoch in range(EPOCHS):
         print(f"  Val loss: {val_loss:.4f}")
         print(f"  I→T R@1 (exact): {i2t_r1:.2%}")
         print(f"  T→I R@1 (exact): {t2i_r1:.2%}")
-        print(f"  Attribute-based (any, no temporal):")
+        print(f"  Attribute-based (all, no temporal):")
         print(f"    R@1: {attr_r1:.4f}  R@5: {attr_r5:.4f}  R@10: {attr_r10:.4f}  MRR: {attr_mrr:.4f}")
         print(f"  Mean positive similarity: {mean_pos_sim:.4f}")
         print(f"  Mean negative similarity: {mean_neg_sim:.4f}")
