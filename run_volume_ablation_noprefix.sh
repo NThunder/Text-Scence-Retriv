@@ -7,7 +7,7 @@ set -e
 OUTDIR="./results_noprefix"
 mkdir -p $OUTDIR/img_cache
 L0="./retriv/camera_aware_captions_L0_p5.json"
-TRAIN="--val_samples_per_scene 4 --batch_size 4 --lr 2e-4 --epochs 10 --use_lora --no_prefix"
+TRAIN="--val_samples_per_scene 4 --batch_size 4 --lr 2e-4 --epochs 5 --use_lora --no_prefix"
 EVAL="--val_samples_per_scene 4 --batch_size 2 --disable_temporal_relevance --relevance_mode all --no_prefix"
 
 for N in 1000 5000 10000 50000; do

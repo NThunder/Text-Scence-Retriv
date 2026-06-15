@@ -47,7 +47,7 @@ OUTPUT_LORA_DIR = args.output_lora_dir
 VALIDATE_EVERY = args.validate_every
 BATCH_SIZE = 16
 LR = 1e-4
-EPOCHS = 3
+EPOCHS = 5
 TEMPERATURE = 0.07
 
 # === Загрузка текстовых эмбеддингов (предвычисленных) ===
