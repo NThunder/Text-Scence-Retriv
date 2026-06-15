@@ -14,8 +14,8 @@ NOPREFIX="--no_prefix"
 for MODEL_TAG in zs ftL0 ftL3; do
   case $MODEL_TAG in
     zs)   MODEL_NAME="NCSOFT/GME-VARCO-VISION-Embedding";;
-    ftL0) MODEL_NAME="./gme_finetuned_L0_p5_v2/best_model";;
-    ftL3) MODEL_NAME="./gme_finetuned_L3_p5_v2/best_model";;
+    ftL0) MODEL_NAME="./gme_ft_L0_noprefix/best_model";;
+    ftL3) MODEL_NAME="./gme_ft_L3_noprefix/best_model";;
   esac
   IMG_CACHE="$OUTDIR/img_cache/gme_${MODEL_TAG}.pth"
   FIRST=true
