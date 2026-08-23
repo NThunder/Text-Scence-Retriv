@@ -16,6 +16,7 @@ import numpy as np
 from tqdm import tqdm
 import json
 import argparse
+from sampling import sample_scenes_uniformly
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from typing import List, Tuple
@@ -45,6 +46,8 @@ def parse_args():
     parser.add_argument("--val_samples_per_scene", type=int, default=-1,
         help="Number of evenly spaced samples per validation scene (-1 = all)")
     parser.add_argument("--no_prefix", action="store_true", help="Omit 'The camera view contains: ' prefix")
+    parser.add_argument("--sample_seed", type=int, default=0,
+        help="Seed for the scene-level training subsample")
     return parser.parse_args()
 
 args = parse_args()
@@ -79,10 +82,11 @@ CAMERAS = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT",
            "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
 
 # Собираем train пары
-train_pairs = []
+pairs_by_scene = {}
 for scene in nusc.scene:
     if scene["name"] not in train_scenes:
         continue
+    bucket = pairs_by_scene.setdefault(scene["name"], [])
     current = scene["first_sample_token"]
     while current:
         if current in camera_captions:
@@ -92,13 +96,14 @@ for scene in nusc.scene:
                         text = " ".join(camera_captions[current][cam])
                     else:
                         text = "The camera view contains: " + "; ".join(camera_captions[current][cam])
-                    train_pairs.append((current, cam, text))
+                    bucket.append((current, cam, text))
         current = nusc.get("sample", current)["next"] if current else None
 
-if args.max_train_pairs > 0:
-    train_pairs = train_pairs[:args.max_train_pairs]
+train_pairs, used_scenes = sample_scenes_uniformly(
+    pairs_by_scene, args.max_train_pairs, seed=args.sample_seed)
 
-print(f"Selected {len(train_pairs)} training pairs")
+print(f"Selected {len(train_pairs)} training pairs "
+      f"from {len(used_scenes)} scenes (seed {args.sample_seed})")
 
 # Собираем validation пары
 val_pairs = []
@@ -270,9 +275,9 @@ class TrainingHistory:
             for temporal in [True, False]:
                 key = f"{mode}_{'temporal' if temporal else 'notemporal'}"
                 self.metrics[key] = {'r1': [], 'r5': [], 'r10': [], 'mrr': []}
-        self.best_r1 = 0.0
+        self.best_score = 0.0
         self.best_epoch = 0
-        self.best_metric_key = "any_temporal"
+        self.best_metric_key = "all_notemporal"
     
     def save_plots(self, output_dir):
         n_variants = len(self.metrics)
@@ -314,7 +319,7 @@ class TrainingHistory:
         history_dict = {
             'train_losses': self.train_losses,
             'val_losses': self.val_losses,
-            'best_r1': self.best_r1,
+            'best_score': self.best_score,
             'best_epoch': self.best_epoch,
             'best_metric_key': self.best_metric_key,
         }
@@ -645,11 +650,13 @@ for epoch in range(start_epoch, args.epochs):
     }
     torch.save(checkpoint, f"{args.output_dir}/checkpoints/checkpoint_epoch_{epoch}.pth")
     
-    # Сохраняем лучшую модель (по any_temporal R@1)
-    best_key = "any_temporal"
-    current_r1 = metrics[best_key]['R@1']
-    if current_r1 > history.best_r1:
-        history.best_r1 = current_r1
+    # Лучшая модель отбирается по той же метрике, что репортится в статье:
+    # строгая релевантность 'all' без временных соседей, MRR вместо R@1 —
+    # при N~2600 стандартная ошибка R@1 около 0.01, отбор по ней ловит шум.
+    best_key = "all_notemporal"
+    current_score = metrics[best_key]['MRR']
+    if current_score > history.best_score:
+        history.best_score = current_score
         history.best_epoch = epoch + 1
         history.best_metric_key = best_key
         
@@ -667,7 +674,7 @@ for epoch in range(start_epoch, args.epochs):
             import shutil
             shutil.copytree(f"{args.output_dir}/embeddings/epoch_{epoch+1}", best_emb_dir, dirs_exist_ok=True)
         
-        print(f"✓ Best model saved! R@1: {history.best_r1:.4f} (epoch {history.best_epoch})")
+        print(f"✓ Best model saved! MRR({best_key}): {history.best_score:.4f} (epoch {history.best_epoch})")
     
     scheduler.step()
     
@@ -680,7 +687,7 @@ history.save_plots(args.output_dir)
 
 # Сохраняем финальные результаты
 final_results = {
-    'best_r1': history.best_r1,
+    'best_score': history.best_score,
     'best_epoch': history.best_epoch,
     'best_metric_key': history.best_metric_key,
 }
@@ -697,7 +704,7 @@ with open(f"{args.output_dir}/final_results.json", 'w') as f:
 print(f"\n{'='*60}")
 print(f"✅ Fine-tuning completed!")
 print(f"{'='*60}")
-print(f"Best R@1 ({history.best_metric_key}): {history.best_r1:.4f} (epoch {history.best_epoch})")
+print(f"Best MRR ({history.best_metric_key}): {history.best_score:.4f} (epoch {history.best_epoch})")
 for key in history.metrics:
     m = history.metrics[key]
     if m['r1']:

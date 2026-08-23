@@ -21,6 +21,8 @@ from nuscenes.utils.splits import create_splits_scenes
 from tqdm import tqdm
 
 import argparse
+from retrieval_metrics import attribute_retrieval_metrics
+from sampling import sample_scenes_uniformly
 
 # === Конфигурация ===
 def parse_args():
@@ -36,6 +38,12 @@ def parse_args():
         help="Max validation samples (-1 = all)")
     parser.add_argument("--val_samples_per_scene", type=int, default=-1,
         help="Number of evenly spaced samples per validation scene (-1 = all)")
+    parser.add_argument("--sample_seed", type=int, default=0,
+        help="Seed for the scene-level training subsample")
+    parser.add_argument("--camera_captions_path", type=str, default=None,
+        help="Caption JSON for attribute-based validation metrics. Without it "
+             "the checkpoint falls back to validation loss, which is not the "
+             "metric the paper reports.")
     return parser.parse_args()
 
 args = parse_args()
@@ -43,6 +51,10 @@ args = parse_args()
 NUSCENES_DATAROOT = args.dataroot
 TEXT_EMB_PATH = args.text_emb_path  # ← вы должны сначала создать этот файл
 VAL_TEXT_EMB_PATH = args.val_text_emb_path
+CAMERA_CAPTIONS = None
+if args.camera_captions_path:
+    with open(args.camera_captions_path, "r") as _f:
+        CAMERA_CAPTIONS = json.load(_f)
 OUTPUT_LORA_DIR = args.output_lora_dir
 VALIDATE_EVERY = args.validate_every
 BATCH_SIZE = 16
@@ -58,17 +70,19 @@ text_embs = torch.load(TEXT_EMB_PATH, map_location="cpu")  # dict: sample_token 
 nusc = NuScenes(version='v1.0-trainval', dataroot=NUSCENES_DATAROOT, verbose=False)
 train_scenes = set(create_splits_scenes()["train"])
 
-train_sample_tokens = []
+tokens_by_scene = {}
 for scene in nusc.scene:
     if scene["name"] in train_scenes:
+        bucket = tokens_by_scene.setdefault(scene["name"], [])
         current = scene["first_sample_token"]
         while current != "":
-            train_sample_tokens.append(current)
+            bucket.append(current)
             current = nusc.get("sample", current)["next"]
 
-if args.max_train_samples > 0:
-    train_sample_tokens = train_sample_tokens[:args.max_train_samples]
-print(f"Selected {len(train_sample_tokens)} train samples.")
+train_sample_tokens, used_scenes = sample_scenes_uniformly(
+    tokens_by_scene, args.max_train_samples, seed=args.sample_seed)
+print(f"Selected {len(train_sample_tokens)} train samples "
+      f"from {len(used_scenes)} scenes (seed {args.sample_seed}).")
 
 # === Собираем список (sample_token, cam) с эмбеддингами ===
 train_pairs = []
@@ -185,7 +199,7 @@ if VAL_TEXT_EMB_PATH:
         val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
 
-def run_validation(vision_model, visual_projection, val_dataloader):
+def run_validation(vision_model, visual_projection, val_dataloader, val_pairs=None):
     vision_model.eval()
     all_img = []
     all_txt = []
@@ -222,12 +236,19 @@ def run_validation(vision_model, visual_projection, val_dataloader):
     t2i_r1 = (sim.argmax(dim=0) == torch.arange(len(sim))).float().mean().item()
     avg_val_loss = total_val_loss / max(total_batches, 1)
 
+    # Метрика бенчмарка: strict "all", без temporal, направление text -> image.
+    # sim выше построен как image @ text.T, поэтому берём транспонированную.
+    attr = None
+    if CAMERA_CAPTIONS is not None and val_pairs:
+        attr = attribute_retrieval_metrics(txt @ img.T, val_pairs[:len(sim)], CAMERA_CAPTIONS)
+
     vision_model.train()
-    return i2t_r1, t2i_r1, avg_val_loss
+    return i2t_r1, t2i_r1, avg_val_loss, attr
 
 # === Обучение ===
 vision_model.train()
 best_val_loss = float("inf")
+best_attr_mrr = -1.0
 best_epoch = -1
 for epoch in range(EPOCHS):
     total_loss = 0
@@ -266,17 +287,28 @@ for epoch in range(EPOCHS):
     print(f"Epoch {epoch+1} Loss: {total_loss/len(dataloader):.4f}")
 
     if val_dataloader is not None and ((epoch + 1) % VALIDATE_EVERY == 0 or epoch == EPOCHS - 1):
-        i2t_r1, t2i_r1, val_loss = run_validation(vision_model, visual_projection, val_dataloader)
+        i2t_r1, t2i_r1, val_loss, attr = run_validation(
+            vision_model, visual_projection, val_dataloader, val_pairs)
         print(f"Validation epoch {epoch+1}: loss={val_loss:.4f}, I->T R@1={i2t_r1:.4f}, T->I R@1={t2i_r1:.4f}")
+        if attr:
+            print(f"  Attribute-based (all, no temporal): R@1={attr['R@1']:.4f} "
+                  f"R@10={attr['R@10']:.4f} MRR={attr['MRR']:.4f} med={attr['median_rank']:.0f}")
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Отбор по репортируемой метрике; без --camera_captions_path откатываемся на лосс.
+        if attr:
+            improved = attr["MRR"] > best_attr_mrr
+            if improved:
+                best_attr_mrr = attr["MRR"]
+        else:
+            improved = val_loss < best_val_loss
+        if improved:
+            best_val_loss = min(best_val_loss, val_loss)
             best_epoch = epoch + 1
             best_dir = OUTPUT_LORA_DIR + "_best"
             os.makedirs(best_dir, exist_ok=True)
             vision_model.save_pretrained(best_dir)
             torch.save(visual_projection.state_dict(), os.path.join(best_dir, "visual_projection.pt"))
-            print(f"New best model (val loss) saved to {best_dir}")
+            print(f"New best model saved to {best_dir}")
 
 # === Сохранение LoRA ===
 vision_model.save_pretrained(OUTPUT_LORA_DIR)
@@ -284,4 +316,7 @@ torch.save(visual_projection.state_dict(), os.path.join(OUTPUT_LORA_DIR, "visual
 print(f"LoRA adapter saved to {OUTPUT_LORA_DIR}")
 
 if best_epoch > 0:
-    print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+    if best_attr_mrr >= 0:
+        print(f"Best attribute MRR: {best_attr_mrr:.4f} at epoch {best_epoch}")
+    else:
+        print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")

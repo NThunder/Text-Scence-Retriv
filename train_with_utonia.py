@@ -23,6 +23,7 @@ import numpy as np
 from tqdm import tqdm
 import json
 import argparse
+from sampling import sample_scenes_uniformly
 import copy
 import matplotlib.pyplot as plt
 from collections import defaultdict
@@ -67,6 +68,8 @@ def parse_args():
     parser.add_argument("--validate_only", type=str, default=None,
         help="Path to checkpoint directory (models/best/) for validation-only mode")
     parser.add_argument("--no_prefix", action="store_true", help="Omit 'The camera view contains: ' prefix")
+    parser.add_argument("--sample_seed", type=int, default=0,
+        help="Seed for the scene-level training subsample")
     return parser.parse_args()
 
 args = parse_args()
@@ -90,17 +93,19 @@ with open(args.camera_captions_path, "r") as f:
 nusc = NuScenes(version='v1.0-trainval', dataroot=args.dataroot, verbose=False)
 train_scenes = set(create_splits_scenes()["train"])
 
-train_sample_tokens = []
+tokens_by_scene = {}
 for scene in nusc.scene:
     if scene["name"] in train_scenes:
+        bucket = tokens_by_scene.setdefault(scene["name"], [])
         current = scene["first_sample_token"]
         while current != "":
-            train_sample_tokens.append(current)
+            bucket.append(current)
             current = nusc.get("sample", current)["next"]
 
-if args.max_train_samples > 0:
-    train_sample_tokens = train_sample_tokens[:args.max_train_samples]
-print(f"Selected {len(train_sample_tokens)} train samples.")
+train_sample_tokens, used_scenes = sample_scenes_uniformly(
+    tokens_by_scene, args.max_train_samples, seed=args.sample_seed)
+print(f"Selected {len(train_sample_tokens)} train samples "
+      f"from {len(used_scenes)} scenes (seed {args.sample_seed}).")
 
 # ========== 3. Сбор пар ==========
 CAMERAS = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT",
@@ -393,7 +398,7 @@ class TrainingHistory:
         self.val_r10 = []
         self.val_mrr = []
         self.val_losses = []
-        self.best_r1 = 0.0
+        self.best_mrr = 0.0
         self.best_epoch = 0
         self.start_epoch = 0
     
@@ -447,7 +452,7 @@ class TrainingHistory:
             'val_r5': self.val_r5,
             'val_r10': self.val_r10,
             'val_mrr': self.val_mrr,
-            'best_r1': self.best_r1,
+            'best_mrr': self.best_mrr,
             'best_epoch': self.best_epoch
         }
         with open(f"{output_dir}/plots/history.json", 'w') as f:
@@ -468,7 +473,7 @@ class TrainingHistory:
                 'val_r5': self.val_r5,
                 'val_r10': self.val_r10,
                 'val_mrr': self.val_mrr,
-                'best_r1': self.best_r1,
+                'best_mrr': self.best_mrr,
                 'best_epoch': self.best_epoch
             }
         }
@@ -486,9 +491,9 @@ class TrainingHistory:
         self.val_r5 = checkpoint['history']['val_r5']
         self.val_r10 = checkpoint['history']['val_r10']
         self.val_mrr = checkpoint['history']['val_mrr']
-        self.best_r1 = checkpoint['history']['best_r1']
+        self.best_mrr = checkpoint['history']['best_mrr']
         self.best_epoch = checkpoint['history']['best_epoch']
-        print(f"Resumed from epoch {self.start_epoch}, best R@1: {self.best_r1:.4f}")
+        print(f"Resumed from epoch {self.start_epoch}, best MRR: {self.best_mrr:.4f}")
         return self.start_epoch
 
 history = TrainingHistory()
@@ -863,8 +868,10 @@ for epoch in range(start_epoch, args.epochs):
     writer.add_scalar('Val/MRR', mrr, epoch)
     writer.add_scalar('Val/Loss', val_loss, epoch)
     
-    if r1 > history.best_r1:
-        history.best_r1 = r1
+    # Отбор по MRR в том же режиме, что задан --relevance_mode
+    # и --disable_temporal_relevance, то есть по репортируемой метрике.
+    if mrr > history.best_mrr:
+        history.best_mrr = mrr
         history.best_epoch = epoch + 1
         
         best_dir = f"{args.output_logs}/models/best"
@@ -878,7 +885,7 @@ for epoch in range(start_epoch, args.epochs):
         torch.save(point_proj.state_dict(), f"{best_dir}/point_proj.pth")
         torch.save(fusion_model.state_dict(), f"{best_dir}/fusion_model.pth")
         
-        print(f"✓ Best model saved! Fused→Text R@1: {history.best_r1:.4f} (epoch {history.best_epoch})")
+        print(f"✓ Best model saved! Fused→Text MRR: {history.best_mrr:.4f} (epoch {history.best_epoch})")
     
     # Save checkpoint every 5 epochs
     if (epoch + 1) % 5 == 0:
@@ -898,7 +905,7 @@ for epoch in range(start_epoch, args.epochs):
                 'val_r5': history.val_r5,
                 'val_r10': history.val_r10,
                 'val_mrr': history.val_mrr,
-                'best_r1': history.best_r1,
+                'best_mrr': history.best_mrr,
                 'best_epoch': history.best_epoch
             }
         }
@@ -927,7 +934,7 @@ torch.save(fusion_model.state_dict(), f"{final_dir}/fusion_model.pth")
 history.save_plots(args.output_logs)
 
 final_results = {
-    'best_r1': history.best_r1,
+    'best_mrr': history.best_mrr,
     'best_epoch': history.best_epoch,
     'final_r1': history.val_r1[-1] if history.val_r1 else 0,
     'final_r5': history.val_r5[-1] if history.val_r5 else 0,
@@ -945,7 +952,7 @@ with open(f"{args.output_logs}/final_results.json", 'w') as f:
 print(f"\n{'='*60}")
 print(f"✅ Training completed!")
 print(f"{'='*60}")
-print(f"Best Fused→Text R@1: {history.best_r1:.4f} (epoch {history.best_epoch})")
+print(f"Best Fused→Text R@1: {history.best_mrr:.4f} (epoch {history.best_epoch})")
 print(f"Final R@1: {final_results['final_r1']:.4f}")
 print(f"Final R@5: {final_results['final_r5']:.4f}")
 print(f"Final R@10: {final_results['final_r10']:.4f}")

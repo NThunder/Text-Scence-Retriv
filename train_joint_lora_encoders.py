@@ -13,6 +13,7 @@ from nuscenes.utils.splits import create_splits_scenes
 from tqdm import tqdm
 import json
 import argparse
+from sampling import sample_scenes_uniformly
 from llm2vec import LLM2Vec
 import numpy as np
 from tqdm import tqdm
@@ -41,6 +42,8 @@ def parse_args():
         help="Max validation samples (-1 = all)")
     parser.add_argument("--val_samples_per_scene", type=int, default=-1, help="Number of evenly spaced samples per validation scene (-1 = all)")
     parser.add_argument("--no_prefix", action="store_true", help="Omit 'The camera view contains: ' prefix")
+    parser.add_argument("--sample_seed", type=int, default=0,
+        help="Seed for the scene-level training subsample")
     return parser.parse_args()
 
 args = parse_args()
@@ -65,17 +68,19 @@ with open(CAMERA_CAPTIONS_PATH, "r") as f:
 nusc = NuScenes(version='v1.0-trainval', dataroot=NUSCENES_DATAROOT, verbose=False)
 train_scenes = set(create_splits_scenes()["train"])
 
-train_sample_tokens = []
+tokens_by_scene = {}
 for scene in nusc.scene:
     if scene["name"] in train_scenes:
+        bucket = tokens_by_scene.setdefault(scene["name"], [])
         current = scene["first_sample_token"]
         while current != "":
-            train_sample_tokens.append(current)
+            bucket.append(current)
             current = nusc.get("sample", current)["next"]
 
-if args.max_train_samples > 0:
-    train_sample_tokens = train_sample_tokens[:args.max_train_samples]
-print(f"Selected {len(train_sample_tokens)} train samples.")
+train_sample_tokens, used_scenes = sample_scenes_uniformly(
+    tokens_by_scene, args.max_train_samples, seed=args.sample_seed)
+print(f"Selected {len(train_sample_tokens)} train samples "
+      f"from {len(used_scenes)} scenes (seed {args.sample_seed}).")
 
 # === 3. Сбор тренировочных пар ===
 CAMERAS = [
@@ -280,7 +285,10 @@ def validate(vision_model, text_model, clip_model, val_dataset, batch_size=16):
     i2t_r1 = (sim_matrix.argmax(dim=1) == torch.arange(len(sim_matrix))).float().mean().item()
     t2i_r1 = (sim_matrix.argmax(dim=0) == torch.arange(len(sim_matrix))).float().mean().item()
     
-    # Метрики с учётом атрибутов (all mode, без temporal)
+    # Метрики с учётом атрибутов (all mode, без temporal).
+    # sim_matrix здесь image->text, а бенчмарк считает text->image;
+    # критерий A(q) ⊆ A(v) несимметричен, поэтому транспонируем.
+    sim_t2i = sim_matrix.T
     attr_r1, attr_r5, attr_r10, attr_mrr = 0.0, 0.0, 0.0, 0.0
     if all_sample_tokens:
         attrs_by_idx = []
@@ -301,7 +309,7 @@ def validate(vision_model, text_model, clip_model, val_dataset, batch_size=16):
                     if query_attrs.issubset(candidate_attrs):
                         relevant.add(idx)
 
-            sorted_indices = torch.argsort(sim_matrix[i], descending=True)
+            sorted_indices = torch.argsort(sim_t2i[i], descending=True)
             found = False
             for rank_pos, idx in enumerate(sorted_indices.tolist()):
                 if idx in relevant:
@@ -344,6 +352,7 @@ print(f"\n=== Starting joint training for {EPOCHS} epochs ===")
 print(f"Batch size: {BATCH_SIZE}, LR: {LR}, Temperature: {TEMPERATURE}")
 
 best_val_loss = float("inf")
+best_attr_mrr = -1.0
 best_epoch = -1
 
 for epoch in range(EPOCHS):
@@ -424,10 +433,12 @@ for epoch in range(EPOCHS):
         print(f"  Mean negative similarity: {mean_neg_sim:.4f}")
         print(f"  Separation gap: {mean_pos_sim - mean_neg_sim:.4f}")
 
-        if val_loss < best_val_loss:
+        # Отбор по той же метрике, что репортится: strict all, без temporal, MRR.
+        if attr_mrr > best_attr_mrr:
+            best_attr_mrr = attr_mrr
             best_val_loss = val_loss
             best_epoch = epoch + 1
-            print("  New best validation loss! Saving checkpoint...")
+            print(f"  New best attribute MRR ({attr_mrr:.4f})! Saving checkpoint...")
 
             vision_model.save_pretrained(OUTPUT_LORA_IMAGE + "_best")
             processor.save_pretrained(OUTPUT_LORA_IMAGE + "_best")
