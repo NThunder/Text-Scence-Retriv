@@ -157,6 +157,7 @@ def main():
         "R@10": float((ranks <= 10).mean()),
         "MRR": float((1.0 / ranks).mean()),
         "median_rank": float(np.median(ranks)),
+        "query_attrs_mean": float(np.mean([len(a) for a in attrs_by_idx])),
         "rel_set_mean": float(rel_sizes.mean()),
         "rel_set_std": float(rel_sizes.std()),
         "rel_set_min": int(rel_sizes.min()),
