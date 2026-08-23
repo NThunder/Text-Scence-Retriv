@@ -14,8 +14,8 @@ L0="./retriv/camera_aware_captions_L0_p5.json"
 
 declare -A MODELS
 MODELS["gme_zs"]="NCSOFT/GME-VARCO-VISION-Embedding"
-MODELS["gme_ftL0"]="./gme_finetuned_L0_p5_v2/best_model"
-MODELS["gme_ftL3"]="./gme_finetuned_L3_p5_v2/best_model"
+MODELS["gme_ftL0"]="./gme_ft_L0_noprefix/best_model"
+MODELS["gme_ftL3"]="./gme_ft_L3_noprefix/best_model"
 
 for TAG in gme_zs gme_ftL0 gme_ftL3; do
   MODEL="${MODELS[$TAG]}"

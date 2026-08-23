@@ -34,6 +34,20 @@ def parse_args():
         default=20,
         help="Minimum num_lidar_pts + num_radar_pts to keep annotation",
     )
+    parser.add_argument(
+        "--dedup_scope",
+        type=str,
+        default="camera",
+        choices=["camera", "keyframe"],
+        help=(
+            "Where duplicate descriptions are collapsed:\n"
+            "  camera   - within a single camera view, on the caption itself (default).\n"
+            "             One view never lists the same description twice, but an\n"
+            "             identical object seen from another camera is preserved.\n"
+            "  keyframe - legacy behaviour: an object is dropped if its attribute\n"
+            "             string already appeared in ANY camera of the same keyframe."
+        ),
+    )
     return parser.parse_args()
 
 args = parse_args()
@@ -118,6 +132,12 @@ from nuscenes import NuScenes
 nuscenes_dataroot = args.dataroot
 nusc = NuScenes(version='v1.0-trainval', dataroot=nuscenes_dataroot, verbose=False)
 
+CAMERAS_LIST = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT",
+                "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
+
+n_kept = 0
+n_dropped = 0
+
 for bbox_token, data in captions.items():
     sample_token = data["sample_token"]
     ann = nusc.get("sample_annotation", bbox_token)
@@ -147,17 +167,36 @@ for bbox_token, data in captions.items():
             "atts": []
         }
     
-    if cam_name in camera_captions[sample_token]:
-        f = False
-        for a in atts:
-            if a in camera_captions[sample_token]["atts"]:
-                f = True
-                break
+    if cam_name in CAMERAS_LIST:
+        rec = camera_captions[sample_token]
+
+        if args.dedup_scope == "keyframe":
+            # Legacy rule, kept only so older runs stay reproducible: the object is
+            # discarded if its attribute string was already seen in any camera of
+            # this keyframe, so one of two white cars in different views is lost.
+            dup = False
+            for a in atts:
+                if a in rec["atts"]:
+                    dup = True
+                    break
+                rec["atts"].append(a)
+            if dup:
+                n_dropped += 1
             else:
-                camera_captions[sample_token]["atts"].append(a)
-        if not f:
-            camera_captions[sample_token][cam_name].append(caption)
-    # print("atts:    ", camera_captions[sample_token]["atts"])
+                rec[cam_name].append(caption)
+                n_kept += 1
+        else:
+            # Default rule: collapse duplicates inside one camera view only, keyed on
+            # the caption itself. A view never lists "A white car." twice, while the
+            # same object type seen from another camera is kept.
+            if caption in rec[cam_name]:
+                n_dropped += 1
+            else:
+                rec[cam_name].append(caption)
+                n_kept += 1
+            for a in atts:
+                if a not in rec["atts"]:
+                    rec["atts"].append(a)
 
 # Сохраняем
 with open(output_path, "w") as f:
@@ -166,9 +205,6 @@ with open(output_path, "w") as f:
 print(f"Saved to {output_path}")
 
 # ========== Статистика ==========
-CAMERAS_LIST = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT",
-                "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
-
 total_samples = len(camera_captions)
 cam_counts = {cam: 0 for cam in CAMERAS_LIST}
 total_pairs = 0
@@ -195,5 +231,9 @@ print(f"  Total camera-view pairs (non-empty):  {total_pairs}")
 for cam in CAMERAS_LIST:
     print(f"    {cam:<22}: {cam_counts[cam]}")
 print(f"  Total captions:                       {total_captions}")
-print(f"  Level: {args.level},  min_lidar_points: {args.min_lidar_points}")
+print(f"  Descriptions kept:                    {n_kept}")
+print(f"  Duplicates dropped:                   {n_dropped}"
+      f"  ({n_dropped / max(1, n_kept + n_dropped):.1%} of annotations above threshold)")
+print(f"  Level: {args.level},  min_lidar_points: {args.min_lidar_points},"
+      f"  dedup_scope: {args.dedup_scope}")
 print(f"{'='*50}")
